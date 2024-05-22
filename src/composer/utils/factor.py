@@ -1,6 +1,4 @@
 import numpy as np
-import pandas as pd
-import datetime
 import plotly.graph_objects as go
 
 class Factor:
@@ -19,17 +17,53 @@ class Factor:
         self.end = end
         self.weight = weight
         self.data = np.array([])
+        self.sine_daily = np.array([])  # Initialize sine_daily property
 
-    def generate_sine(self, frequency: float, amplitude: float, slope: float, noise_level: float = 0.05, 
-                      prev_half_chunk: np.ndarray = None, start_price: float = None, chunk_size: int = 432000) -> np.ndarray:
+    def _generate_full_period_sine(self, frequency: float, amplitude: float, slope: float, noise_level: float, period_days: float) -> np.ndarray:
         """
-        Generate a sine wave for the next chunk of the factor data.
+        Generate a full period sine wave for the entire time span.
 
         Args:
             frequency (float): Frequency of the sine wave.
             amplitude (float): Amplitude of the sine wave.
             slope (float): Slope of the sine wave.
             noise_level (float): Noise level to add to the sine wave.
+            period_days (float): Period of the sine wave in days.
+
+        Returns:
+            np.ndarray: Generated full period sine wave.
+        """
+        period_seconds = period_days * 24 * 3600
+        total_seconds = self.end - self.start
+        adjusted_frequency = 2 * np.pi / period_seconds
+
+        t = np.linspace(0, total_seconds, total_seconds)
+        sine_wave = amplitude * np.sin(adjusted_frequency * t)
+
+        # Normalize time vector to [0, 1] range for the trend line
+        normalized_t = t / total_seconds
+        trend_line = slope * normalized_t
+
+        wave = sine_wave + trend_line
+
+        # Normalize the wave to be between 0.0 and 15.0
+        wave_min = np.min(wave)
+        wave_max = np.max(wave)
+        wave = 15 * (wave - wave_min) / (wave_max - wave_min)
+
+        return wave
+
+    def generate_sine(self, frequency: float, amplitude: float, slope: float, noise_level: float = 0.05, 
+                      period_days: float = 30, prev_half_chunk: np.ndarray = None, start_price: float = None, chunk_size: int = 432000) -> np.ndarray:
+        """
+        Generate a sine wave for the next chunk of the factor data.
+
+        Args:
+            frequency (float): Frequency scaling factor for the sine wave.
+            amplitude (float): Amplitude of the sine wave.
+            slope (float): Slope of the sine wave.
+            noise_level (float): Noise level to add to the sine wave.
+            period_days (float): Period of the sine wave in days.
             prev_half_chunk (np.ndarray, optional): Previous half chunk of data.
             start_price (float, optional): Starting price for the first chunk.
             chunk_size (int): Size of the chunk to generate in seconds (default is 5 days).
@@ -37,27 +71,30 @@ class Factor:
         Returns:
             np.ndarray: Generated chunk of factor data.
         """
+        if self.sine_daily.size == 0:
+            self.sine_daily = self._generate_full_period_sine(frequency, amplitude, slope, noise_level, period_days)
+
         if prev_half_chunk is not None:
             half_chunk_size = len(prev_half_chunk)
             start_time = self.start + half_chunk_size
         elif start_price is not None:
             half_chunk_size = 0
             start_time = self.start
+            # Start normalization at 1.0 if starting from a given price
+            self.data = np.ones(chunk_size)
         else:
             raise ValueError("Either prev_half_chunk or start_price must be provided")
 
         if start_time + chunk_size > self.end:
             raise ValueError("Cannot generate chunk beyond the end time")
 
-        t = np.linspace(start_time, start_time + chunk_size - 1, chunk_size)
-        noise = np.random.normal(0, noise_level, chunk_size)
-        sine_wave = amplitude * np.sin(2 * np.pi * frequency * t / chunk_size)
-        trend_line = slope * np.linspace(0, chunk_size, chunk_size)
-        wave = sine_wave + noise + trend_line
-        wave *= np.random.uniform(0.95, 1.05, chunk_size)
+        # Extract the relevant section of the sine_daily for this chunk
+        start_index = start_time - self.start
+        end_index = start_index + chunk_size
+        sine_chunk = self.sine_daily[start_index:end_index]
 
-        # Normalize the wave to be around 1.0
-        wave = 1 + (wave / np.max(np.abs(wave)))
+        noise = np.random.normal(0, noise_level, chunk_size)
+        wave = sine_chunk + noise
 
         if prev_half_chunk is not None:
             self.data = np.concatenate((prev_half_chunk, wave[half_chunk_size:]))
