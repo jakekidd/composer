@@ -10,7 +10,7 @@ class Severity:
     ERROR = "ERROR"
 
 class Logger:
-    def __init__(self, log_dir: str = 'logs/', log_file: str = 'app.log', should_print: bool = False) -> None:
+    def __init__(self, log_dir: str = 'logs/', log_file: str = 'app.log', should_print: bool = True) -> None:
         self.log_dir = log_dir
         self.log_file = log_file
         self.should_print = should_print
@@ -30,7 +30,7 @@ class Logger:
             log_message = f"{severity} [{timestamp}] [{file_name}:{function_name}]: {message}"
         else:
             log_message = f"{severity} [{timestamp}] [{file_name}:{class_name}:{function_name}]: {message}"
-        
+
         # Log to file
         if severity == Severity.DEBUG:
             self.logger.debug(log_message)
