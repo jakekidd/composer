@@ -3,10 +3,13 @@ import pandas as pd
 import random
 import time
 import sys
+import datetime
+import tabulate
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from src.composer.index.atlas import Atlas
 from src.composer.utils.logger import Logger
+from src.composer.utils.misc import print_df
 
 # Constants.
 TIME_INTERVAL = "S"  # Interval between data points.
@@ -41,6 +44,10 @@ TOKENS = {
 
 logger = Logger(should_print=True)
 
+def utc_to_formatted(utc_time_seconds: float) -> str:
+    date = datetime.datetime.fromtimestamp(utc_time_seconds, tz=datetime.timezone.utc)
+    return date.strftime("%Y-%m-%d %H:%M:%S")
+
 def generate_sine_wave(start_time: int, end_time: int, frequency: float = 1 / (14 * 30.44)) -> pd.DataFrame:
     """
     Generate a sine wave representing bear/bull cycles.
@@ -53,7 +60,7 @@ def generate_sine_wave(start_time: int, end_time: int, frequency: float = 1 / (1
     Returns:
         pd.DataFrame: DataFrame with daily timestamps and normalized sine wave values between -1.0 and 1.0.
     """
-    logger.debug(__file__, generate_sine_wave.__name__, f"Generating sine wave for bear/bull cycle from {start_time} to {end_time}.")
+    logger.debug(__file__, generate_sine_wave.__name__, f"Generating sine wave for bear/bull cycle from {utc_to_formatted(start_time)} to {utc_to_formatted(end_time)}.")
     # Generate daily timestamps
     periods = pd.date_range(
         start=pd.to_datetime(start_time, unit='s'),
@@ -88,7 +95,7 @@ def generate_price_data(start_price: float, start_time: int, end_time: int, vola
     Returns:
         pd.DataFrame: Generated price data.
     """
-    logger.debug(__file__, generate_price_data.__name__, f"Generating price data from {start_time} to {end_time}. Volatility: {volatility}.")
+    logger.debug(__file__, generate_price_data.__name__, f"Generating price data from {utc_to_formatted(start_time)} to {utc_to_formatted(end_time)}.")
     method_start_time = time.time()
     periods = pd.date_range(
         start=pd.to_datetime(start_time, unit='s'),
@@ -122,16 +129,14 @@ def generate_price_data(start_price: float, start_time: int, end_time: int, vola
             sys.stdout.write(f"\rGenerating price data: [{bar}] {progress:.2f}% {spinner[spinner_index]}")
             sys.stdout.flush()
             time.sleep(0.1)
-    progress += hourly_increment
-    bar = '=' * int(progress / 2) + ' ' * (50 - int(progress / 2))
-    sys.stdout.write(f"\rGenerating price data: [{bar}] 100%\n")
+    sys.stdout.write(f"\rGenerating price data: [==================================================] 100%         \n")
 
     prices = np.array(prices[:len(periods)])
 
     # Convert to DataFrame
     price_data = pd.DataFrame({'timestamp': periods.astype(int) // 10**9, 'price': prices})
 
-    logger.debug(__file__, generate_price_data.__name__, f"Generated price data. Took: {time.time() - method_start_time}s.")
+    logger.debug(__file__, generate_price_data.__name__, f"Generated price data. Took: {int(time.time() - method_start_time)}s.")
     return price_data
 
 def plot_price_and_sine_wave_chunk(price_data: pd.DataFrame, sine_wave_df: pd.DataFrame, start_time: int, end_time: int) -> None:
@@ -202,12 +207,16 @@ def main() -> None:
     end_time = TOKENS["end"]
 
     # Check if the catalog is set, if not, set it.
+    catalog = None
     sine_wave_df = None
+    chunk_size = None
+    stable = None
     try:
         catalog = atlas.get_catalog()
-        start_time, end_time, chunk, stable, cycle = catalog
+        start_time, end_time, chunk_size, stable, cycle = catalog
         sine_wave_df = pd.DataFrame({'timestamp': pd.date_range(start=pd.to_datetime(start_time, unit='s'), end=pd.to_datetime(end_time, unit='s'), freq='D'), 'sine_wave': cycle})
-        
+        cycle = None # Erase cycle to clear mem, we only need the dataframe.
+
         # Check if sine_wave_df is valid
         if sine_wave_df.empty or sine_wave_df['timestamp'].iloc[0] != pd.to_datetime(start_time, unit='s') or sine_wave_df['timestamp'].iloc[-1] != pd.to_datetime(end_time, unit='s'):
             logger.warn(__file__, main.__name__, "Invalid sine_wave_df. Regenerating...", Atlas.__name__)
@@ -221,6 +230,24 @@ def main() -> None:
         sine_wave_df = generate_sine_wave(start_time, end_time)
         atlas.set_catalog(start_time, end_time, CHUNK_SIZE, TOKENS["stable"], sine_wave_df['sine_wave'].values)
         logger.debug(__file__, main.__name__, "Catalog data generated and saved.", Atlas.__name__)
+    logger.debug(__file__, main.__name__, f"Catalog:\n\tStart: {utc_to_formatted(start_time)}\n\tEnd: {utc_to_formatted(end_time)}", Atlas.__name__)
+
+    # Checks to ensure config is remaining consistent with generated data in DB.
+    if chunk_size != CHUNK_SIZE:
+        logger.error(__file__, main.__name__, f"Catalog chunk size {chunk_size} != configured chunk size {CHUNK_SIZE}. Exiting.", Atlas.__name__)
+        exit()
+    if stable != TOKENS["stable"]:
+        configured_stable = TOKENS["stable"]
+        logger.warn(__file__, main.__name__, f"Catalog stable {stable} != configured stable {configured_stable}.", Atlas.__name__)
+    if start_time != TOKENS["start"]:
+        configured_start = TOKENS["start"]
+        logger.error(__file__, main.__name__, f"Catalog start time {utc_to_formatted(start_time)} != configured chunk size {utc_to_formatted(configured_start)}. Exiting.", Atlas.__name__)
+        exit()
+    if end_time != TOKENS["end"]:
+        configured_end = TOKENS["end"]
+        logger.error(__file__, main.__name__, f"Catalog chunk size {utc_to_formatted(end_time)} != configured chunk size {utc_to_formatted(configured_end)}. Exiting.", Atlas.__name__)
+        exit()
+
 
     # Display the second graph for the full period sine wave
     plot_sine_wave_full_period(sine_wave_df)
@@ -238,7 +265,7 @@ def main() -> None:
             last_timestamp = price_data['timestamp'].iloc[-1]
             start_price = price_data['price'].iloc[-1]
             current_time = last_timestamp + 1  # Continue from the last timestamp
-            logger.info(__file__, main.__name__, f"Continuing price data generation from timestamp {last_timestamp}.")
+            logger.info(__file__, main.__name__, f"Continuing price data generation from timestamp {utc_to_formatted(last_timestamp)}.")
         else:
             start_price = token_config["initial_price"]
             current_time = start_time
@@ -262,7 +289,7 @@ def main() -> None:
         # Commenting out the chunk display for now
         # plot_price_and_sine_wave_chunk(chunk_price_data, sine_wave_df, current_time - CHUNK_SIZE, current_time)
 
-        logger.debug(__file__, main.__name__, f"Price data chunk saved for period {current_time - CHUNK_SIZE} to {current_time}.")
+        logger.debug(__file__, main.__name__, f"Price data chunk saved for period {utc_to_formatted(current_time - CHUNK_SIZE)} to {utc_to_formatted(current_time)}.")
 
 
     # Retrieve the full price data and convert to daily datapoints
