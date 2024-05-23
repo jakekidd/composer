@@ -96,7 +96,8 @@ class Atlas:
                     popularity REAL,
                     timestamp REAL,
                     price REAL,
-                    ohlcv BLOB
+                    ohlcv BLOB,
+                    factors BLOB
                 )
             """)
             conn.commit()
@@ -150,6 +151,57 @@ class Atlas:
             conn.commit()
         self.logger.debug(__file__, "append_token_ohlcv", f"Appended new OHLCV data for token {self.token}.", Atlas.__name__)
 
+    def set_token_factors(self, factors_data: pd.DataFrame) -> None:
+        """
+        Set the factors data for a token in the database.
+
+        Args:
+            factors_data (pd.DataFrame): DataFrame containing factors data.
+        """
+        factors_blob = factors_data.to_json().encode('utf-8')
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                UPDATE {self.token} SET factors = ? WHERE id = 1
+            """, (factors_blob,))
+            conn.commit()
+        self.logger.debug(__file__, "set_token_factors", f"Set factors data for token {self.token}.", Atlas.__name__)
+
+    def set_token_price(self, price_data: pd.DataFrame) -> None:
+        """
+        Set the token price data in the database, overwriting any existing data.
+
+        Args:
+            price_data (pd.DataFrame): DataFrame containing price data with columns ['timestamp', 'price'].
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"DELETE FROM {self.token} WHERE price IS NOT NULL")
+            cursor.executemany(f"""
+                INSERT INTO {self.token} (timestamp, price) VALUES (?, ?)
+            """, [(row['timestamp'], row['price']) for _, row in price_data.iterrows()])
+            conn.commit()
+        self.logger.debug(__file__, "set_token_price", f"Set new price data for token {self.token}.", Atlas.__name__)
+
+    def get_token_factors(self) -> pd.DataFrame:
+        """
+        Retrieve the factors data for a token from the database.
+
+        Returns:
+            pd.DataFrame: DataFrame containing the factors data.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT factors FROM {self.token} WHERE factors IS NOT NULL")
+            data = cursor.fetchone()
+        if data:
+            factors_data = pd.read_json(data[0].decode('utf-8'))
+            self.logger.debug(__file__, "get_token_factors", f"Retrieved factors data for token {self.token}.", Atlas.__name__)
+            return factors_data
+        else:
+            self.logger.debug(__file__, "get_token_factors", f"No factors data found for token {self.token}.", Atlas.__name__)
+            return pd.DataFrame()
+
     def get_token_price(self) -> pd.DataFrame:
         """
         Retrieve the token price data from the database.
@@ -177,7 +229,7 @@ class Atlas:
             cursor.execute(f"SELECT ohlcv FROM {self.token} WHERE ohlcv IS NOT NULL")
             data = cursor.fetchall()
         if data:
-            ohlcv_data = pd.read_json(data[0][0].decode('utf-8'))
+            ohlcv_data = pd.read_json(data[0].decode('utf-8'))
             self.logger.debug(__file__, "get_token_ohlcv", f"Retrieved token OHLCV data for {self.token}.", Atlas.__name__)
             return ohlcv_data
         else:

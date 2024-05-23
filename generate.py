@@ -4,7 +4,6 @@ import random
 import time
 import sys
 import datetime
-import tabulate
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from src.composer.index.atlas import Atlas
@@ -17,7 +16,8 @@ CHUNK_SIZE = 5 * 24 * 60 * 60  # 5 days in seconds.
 
 TOKENS = {
     "start": 1577836800,  # UTC timestamp for 2020-01-01 00:00:00
-    "end": 1583020800,  # UTC timestamp for 2020-04-01 00:00:00
+    "end": 1580515200,  # UTC timestamp for 2020-02-01 00:00:00
+    # "end": 1583020800,  # UTC timestamp for 2020-04-01 00:00:00
     "stable": "USDC",
     "tokens": [
         {
@@ -48,7 +48,7 @@ def utc_to_formatted(utc_time_seconds: float) -> str:
     date = datetime.datetime.fromtimestamp(utc_time_seconds, tz=datetime.timezone.utc)
     return date.strftime("%Y-%m-%d %H:%M:%S")
 
-def generate_sine_wave(start_time: int, end_time: int, frequency: float = 1 / (14 * 30.44)) -> pd.DataFrame:
+def generate_cycle_wave(start_time: int, end_time: int, frequency: float = 1 / (14 * 30.44)) -> pd.DataFrame:
     """
     Generate a sine wave representing bear/bull cycles.
 
@@ -60,7 +60,7 @@ def generate_sine_wave(start_time: int, end_time: int, frequency: float = 1 / (1
     Returns:
         pd.DataFrame: DataFrame with daily timestamps and normalized sine wave values between -1.0 and 1.0.
     """
-    logger.debug(__file__, generate_sine_wave.__name__, f"Generating sine wave for bear/bull cycle from {utc_to_formatted(start_time)} to {utc_to_formatted(end_time)}.")
+    logger.debug(__file__, generate_cycle_wave.__name__, f"Generating sine wave for bear/bull cycle from {utc_to_formatted(start_time)} to {utc_to_formatted(end_time)}.")
     # Generate daily timestamps
     periods = pd.date_range(
         start=pd.to_datetime(start_time, unit='s'),
@@ -78,25 +78,112 @@ def generate_sine_wave(start_time: int, end_time: int, frequency: float = 1 / (1
     # Create DataFrame
     sine_wave_df = pd.DataFrame({'timestamp': periods, 'sine_wave': sine_wave})
 
-    logger.debug(__file__, generate_sine_wave.__name__, "Generated normalized sine wave for bear/bull cycle.")
+    logger.debug(__file__, generate_cycle_wave.__name__, "Generated normalized sine wave for bear/bull cycle.")
     return sine_wave_df
 
-def generate_price_data(start_price: float, start_time: int, end_time: int, volatility: float, sine_wave_df: pd.DataFrame):
+def generate_factors_wave(start_time: int, end_time: int, base_wave: pd.DataFrame, valuation: dict) -> pd.DataFrame:
+    """
+    Generate a valuation wave and combine it with the base wave.
+
+    Args:
+        start_time (int): Start timestamp in UTC seconds.
+        end_time (int): End timestamp in UTC seconds.
+        base_wave (pd.DataFrame): DataFrame containing the base sine wave with daily timestamps.
+        valuation (dict): Dictionary containing 'slope', 'amplitude', and 'frequency' for the valuation wave.
+
+    Returns:
+        pd.DataFrame: DataFrame with daily timestamps and normalized sine wave values between -1.0 and 1.0.
+    """
+    # Generate hourly timestamps
+    periods = pd.date_range(
+        start=pd.to_datetime(start_time, unit='s'),
+        end=pd.to_datetime(end_time, unit='s'),
+        freq='H'
+    )
+
+    # Generate the base sine wave for the full period
+    base_period = 1 # 1 day periodicity.
+    t = np.arange(len(periods))
+    # frequency = valuation['frequency'] * (2 * np.pi / (base_period * 24))  # Assume 30 days as a base period # *
+    # valuation_wave = valuation['amplitude'] * np.sin(frequency * t) + valuation['slope'] * t / len(t) # *
+    # valuation_wave = valuation['amplitude'] * (np.sin(frequency * t) + valuation['slope'] * t / len(t))
+    t = np.arange(len(periods))
+    frequency = valuation['frequency'] * (2 * np.pi / (base_period * 24))  # Assume 30 days as a base period
+    valuation_wave = valuation['amplitude'] * np.sin(frequency * t) + valuation['slope'] * 15.0 * t / len(t)
+
+    # Add noise to the valuation wave
+    # noise = np.random.normal(0, 0.01, len(valuation_wave))  # Adjust noise level as needed # *
+    # valuation_wave += noise
+    noise_level = 2.0  # Adjust noise level as needed
+    noise = np.random.normal(0, noise_level, len(valuation_wave))
+    valuation_wave += noise
+
+    # Create DataFrame for valuation wave
+    valuation_wave_df = pd.DataFrame({'timestamp': periods, 'valuation_wave': valuation_wave})
+
+    # Interpolate base wave to hourly frequency
+    base_wave_hourly = base_wave.set_index('timestamp').resample('H').interpolate(method='linear').reset_index()
+
+    # Sum the valuation wave with the base wave
+    combined_wave = base_wave_hourly.copy()
+    combined_wave['combined_wave'] = base_wave_hourly['sine_wave'] * valuation_wave_df['valuation_wave'].values
+
+    # Normalize the summed wave between -1 and 1
+    min_value = np.min(combined_wave['combined_wave'].values)  # Find the minimum value in the combined_wave
+    max_value = np.max(combined_wave['combined_wave'].values)
+    # combined_wave['combined_wave'] += abs(min_value)  # Raise the combined_wave by the minimum value
+    combined_wave['combined_wave'] = 2 * (combined_wave['combined_wave'] - min_value) / (max_value - min_value) - 1
+
+    # Plot the waves
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.02)
+
+    # Plot summed wave
+    fig.add_trace(
+        go.Scatter(x=combined_wave['timestamp'], y=combined_wave['combined_wave'], mode='lines', name='Summed Wave'),
+        row=1, col=1
+    )
+
+    # Plot base wave
+    fig.add_trace(
+        go.Scatter(x=base_wave_hourly['timestamp'], y=base_wave_hourly['sine_wave'], mode='lines', name='Base Wave'),
+        row=2, col=1
+    )
+
+    # Plot valuation wave
+    fig.add_trace(
+        go.Scatter(x=valuation_wave_df['timestamp'], y=valuation_wave_df['valuation_wave'], mode='lines', name='Valuation Wave'),
+        row=3, col=1
+    )
+
+    fig.update_layout(
+        title="Generated Valuation Wave and Combined Waves",
+        xaxis_title="Time",
+        template="plotly_dark",
+        height=900  # Adjust height based on the number of plots
+    )
+
+    fig.show()
+
+    return combined_wave
+
+def generate_price_data(original_price: float, start_price: float, start_time: int, end_time: int, volatility: float, combined_wave_df: pd.DataFrame):
     """
     Generate price data using a random walk influenced by a bear/bull cycle sine wave.
 
     Args:
+        original_price (float): Original starting price at the beginning of the total period.
         start_price (float): Starting price.
         start_time (int): Start timestamp in UTC seconds.
         end_time (int): End timestamp in UTC seconds.
         volatility (float): Base volatility.
-        sine_wave_df (pd.DataFrame): DataFrame containing the sine wave for bear/bull cycles.
+        combined_wave_df (pd.DataFrame): DataFrame containing the aggregated external factors.
 
     Returns:
         pd.DataFrame: Generated price data.
     """
-    logger.debug(__file__, generate_price_data.__name__, f"Generating price data from {utc_to_formatted(start_time)} to {utc_to_formatted(end_time)}.")
+    logger.info(__file__, generate_price_data.__name__, f"Generating price data from {utc_to_formatted(start_time)} to {utc_to_formatted(end_time)}.")
     method_start_time = time.time()
+
     periods = pd.date_range(
         start=pd.to_datetime(start_time, unit='s'),
         end=pd.to_datetime(end_time, unit='s'),
@@ -111,14 +198,40 @@ def generate_price_data(start_price: float, start_time: int, end_time: int, vola
     total_seconds = (end_time - start_time)
     hourly_increment = (3600 / total_seconds) * 100  # Increment percentage for each hour
     progress = 0
+
+    # Precompute combined wave values for efficiency
+    # combined_wave_dict = combined_wave_df.set_index('timestamp')['combined_wave'].to_dict()
+
     # Generate random walk
     for i, current_time in enumerate(periods[1:], start=1):
-        current_day = current_time.floor('D')
-        sine_value = sine_wave_df.loc[sine_wave_df['timestamp'] == current_day, 'sine_wave'].values[0]
-        adjusted_volatility = volatility * (1 + sine_value)  # Adjust volatility based on sine wave
+        # current_day = current_time.floor('D')
+        # sine_value = sine_wave_df.loc[sine_wave_df['timestamp'] == current_day, 'sine_wave'].values[0]
 
-        change = random.gauss(0, adjusted_volatility)
-        price = prices[-1] * (1 + change)
+        # adjusted_volatility = volatility * (1 + sine_value)  # Adjust volatility based on sine wave
+        # Reverse the effect: less std. deviation in bull (sine_value > 0), more in bear (sine_value < 0)
+        # adjusted_volatility = volatility * (1 - sine_value)
+
+        # trend = 0.0001 * sine_value  # Base trend adjustment based on sine wave # *
+        # adjusted_volatility = volatility * (1 - abs(sine_value))  # Adjust volatility based on sine wave # *
+        # change = random.gauss(trend, adjusted_volatility)  # Use trend as the mean # *
+        # current_hour = current_time.floor('H')  # Use hourly granularity for combined_wave
+        # combined_value = combined_wave_df.loc[combined_wave_df['timestamp'] == current_hour, 'combined_wave'].values[0]
+
+        # current_hour = current_time.floor('H')  # Use hourly granularity for combined_wave
+        # combined_value = combined_wave_dict.get(current_hour, 0)
+
+        # trend = 0.0001 * combined_value  # Base trend adjustment based on combined wave
+        # adjusted_volatility = volatility #* (1 - abs(combined_value))  # Adjust volatility based on combined wave
+        # change = random.gauss(0, volatility)
+        # price = prices[-1] * (1 + change)
+        # price += combined_value * (original_price / 10.0) # TODO: Use the original value scale.
+        # prices.append(price)
+
+        last_price = prices[-1]
+        # adjusted_volatility = volatility * (1 + (last_price / (last_price + 1e-5)))
+        change = random.gauss(1.35e-08, 6.52e-05)# 0.005)
+        price = last_price * (1 + change)
+        # price += combined_value * (original_price / 10.0) # TODO: Use the original value scale.
         prices.append(price)
         # if len(prices) % (24 * 3600) == 0:  # Log progress every day
         #     logger.debug(__file__, generate_price_data.__name__, f"Generated price data for {len(prices) // (24 * 3600)} days.")
@@ -136,7 +249,29 @@ def generate_price_data(start_price: float, start_time: int, end_time: int, vola
     # Convert to DataFrame
     price_data = pd.DataFrame({'timestamp': periods.astype(int) // 10**9, 'price': prices})
 
-    logger.debug(__file__, generate_price_data.__name__, f"Generated price data. Took: {int(time.time() - method_start_time)}s.")
+    logger.info(__file__, generate_price_data.__name__, f"Generated price data. Took: {int(time.time() - method_start_time)}s.")
+    return price_data
+
+def apply_combined_wave_to_price_data(price_data: pd.DataFrame, combined_wave_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply the combined wave influence to the finalized price data.
+
+    Args:
+        price_data (pd.DataFrame): DataFrame containing the finalized price data with 1-second granularity.
+        combined_wave_df (pd.DataFrame): DataFrame containing the combined wave with 1-hour granularity.
+
+    Returns:
+        pd.DataFrame: Updated price data with combined wave influence applied.
+    """
+    price_data = price_data.copy()  # To avoid modifying the original DataFrame
+    combined_wave_dict = combined_wave_df.set_index('timestamp')['combined_wave'].to_dict()
+
+    # Apply combined wave influence
+    for i, row in price_data.iterrows():
+        current_hour = row['timestamp'] // 3600 * 3600  # Align to the nearest hour
+        combined_value = combined_wave_dict.get(current_hour, 0)
+        price_data.at[i, 'price'] += combined_value * (row['price'] * 9.9)
+
     return price_data
 
 def plot_price_and_sine_wave_chunk(price_data: pd.DataFrame, sine_wave_df: pd.DataFrame, start_time: int, end_time: int) -> None:
@@ -208,29 +343,36 @@ def main() -> None:
 
     # Check if the catalog is set, if not, set it.
     catalog = None
-    sine_wave_df = None
+    cycle_wave_df = None
     chunk_size = None
     stable = None
     try:
         catalog = atlas.get_catalog()
         start_time, end_time, chunk_size, stable, cycle = catalog
-        sine_wave_df = pd.DataFrame({'timestamp': pd.date_range(start=pd.to_datetime(start_time, unit='s'), end=pd.to_datetime(end_time, unit='s'), freq='D'), 'sine_wave': cycle})
+        cycle_wave_df = pd.DataFrame({'timestamp': pd.date_range(start=pd.to_datetime(start_time, unit='s'), end=pd.to_datetime(end_time, unit='s'), freq='D'), 'sine_wave': cycle})
         cycle = None # Erase cycle to clear mem, we only need the dataframe.
 
         # Check if sine_wave_df is valid
-        if sine_wave_df.empty or sine_wave_df['timestamp'].iloc[0] != pd.to_datetime(start_time, unit='s') or sine_wave_df['timestamp'].iloc[-1] != pd.to_datetime(end_time, unit='s'):
+        if cycle_wave_df.empty or cycle_wave_df['timestamp'].iloc[0] != pd.to_datetime(start_time, unit='s') or cycle_wave_df['timestamp'].iloc[-1] != pd.to_datetime(end_time, unit='s'):
             logger.warn(__file__, main.__name__, "Invalid sine_wave_df. Regenerating...", Atlas.__name__)
-            sine_wave_df = generate_sine_wave(start_time, end_time)
-            atlas.set_catalog(start_time, end_time, CHUNK_SIZE, TOKENS["stable"], sine_wave_df['sine_wave'].values)
+            cycle_wave_df = generate_cycle_wave(start_time, end_time)
+            atlas.set_catalog(start_time, end_time, CHUNK_SIZE, TOKENS["stable"], cycle_wave_df['sine_wave'].values)
             logger.debug(__file__, main.__name__, "Catalog data regenerated and saved.", Atlas.__name__)
         else:
             logger.debug(__file__, main.__name__, "Catalog data retrieved and validated.", Atlas.__name__)
     except ValueError:
         logger.debug(__file__, main.__name__, "Catalog data not found. Generating...", Atlas.__name__)
-        sine_wave_df = generate_sine_wave(start_time, end_time)
-        atlas.set_catalog(start_time, end_time, CHUNK_SIZE, TOKENS["stable"], sine_wave_df['sine_wave'].values)
+        cycle_wave_df = generate_cycle_wave(start_time, end_time)
+        atlas.set_catalog(start_time, end_time, CHUNK_SIZE, TOKENS["stable"], cycle_wave_df['sine_wave'].values)
         logger.debug(__file__, main.__name__, "Catalog data generated and saved.", Atlas.__name__)
-    logger.debug(__file__, main.__name__, f"Catalog:\n\tStart: {utc_to_formatted(start_time)}\n\tEnd: {utc_to_formatted(end_time)}", Atlas.__name__)
+
+    # Set chunk size and stable if left at None value.
+    if chunk_size is None:
+        chunk_size = CHUNK_SIZE
+    if stable is None:
+        stable = TOKENS["stable"]
+
+    logger.debug(__file__, main.__name__, f"Catalog:\n\tStart: {utc_to_formatted(start_time)}\n\tEnd: {utc_to_formatted(end_time)}\n\tChunk Size: {chunk_size}\n\tStable: {stable}", Atlas.__name__)
 
     # Checks to ensure config is remaining consistent with generated data in DB.
     if chunk_size != CHUNK_SIZE:
@@ -250,13 +392,30 @@ def main() -> None:
 
 
     # Display the second graph for the full period sine wave
-    plot_sine_wave_full_period(sine_wave_df)
+    plot_sine_wave_full_period(cycle_wave_df)
 
     # Initialize token table
     token_config = TOKENS["tokens"][0]
+    # Set the token in Atlas before accessing token-specific methods
+    atlas.token = token_config["name"]  # Add this line
     atlas.create_token_table(token_config["name"])
     atlas.set_token_initial(token_config["initial_price"], token_config["volatility"], token_config["popularity"])
     logger.debug(__file__, main.__name__, "Token table initialized as needed and initial configuration set.")
+
+    # Generate or retrieve combined wave and save it to the database
+    try:
+        combined_wave_df = atlas.get_token_factors()
+        if combined_wave_df.empty:
+            raise ValueError("No combined wave data found.")
+        logger.debug(__file__, main.__name__, "Combined wave data retrieved from database.", Atlas.__name__)
+    except ValueError:
+        combined_wave_df = generate_factors_wave(start_time, end_time, cycle_wave_df, {
+            'slope': 0.5,
+            'amplitude': 1.0,
+            'frequency': 0.1
+        })
+        atlas.set_token_factors(combined_wave_df)
+        logger.debug(__file__, main.__name__, "Generated and saved combined wave data.", Atlas.__name__)
 
     # Retrieve the price data if it exists
     try:
@@ -280,7 +439,7 @@ def main() -> None:
         if next_time > end_time:
             next_time = end_time
 
-        chunk_price_data = generate_price_data(start_price, current_time, next_time, token_config["volatility"], sine_wave_df)
+        chunk_price_data = generate_price_data(token_config["initial_price"], start_price, current_time, next_time, token_config["volatility"], combined_wave_df)
         atlas.append_token_price(chunk_price_data)
 
         start_price = chunk_price_data['price'].iloc[-1]
@@ -289,20 +448,29 @@ def main() -> None:
         # Commenting out the chunk display for now
         # plot_price_and_sine_wave_chunk(chunk_price_data, sine_wave_df, current_time - CHUNK_SIZE, current_time)
 
-        logger.debug(__file__, main.__name__, f"Price data chunk saved for period {utc_to_formatted(current_time - CHUNK_SIZE)} to {utc_to_formatted(current_time)}.")
+        logger.info(__file__, main.__name__, f"Price data chunk saved for period {utc_to_formatted(current_time - CHUNK_SIZE)} to {utc_to_formatted(current_time)}.")
 
 
     # Retrieve the full price data and convert to daily datapoints
     full_price_data = atlas.get_token_price()
+    # logger.info(__file__, main.__name__, f"Applying combined factor wave to price data...")
+    # apply_start_time = time.time()
+    # updated_price_data = apply_combined_wave_to_price_data(full_price_data, combined_wave_df)
+    # logger.info(__file__, main.__name__, f"Applied combined factor wave to price data. Took: {time.time() - apply_start_time}s")
+
     full_price_data['timestamp'] = pd.to_datetime(full_price_data['timestamp'], unit='s')
-    daily_price_data = full_price_data.resample('D', on='timestamp').mean().reset_index()
+    # updated_price_data['timestamp'] = pd.to_datetime(updated_price_data['timestamp'], unit='s')
+
+    # daily_price_data = full_price_data.resample('D', on='timestamp').mean().reset_index()
+    # hourly_price_data = updated_price_data.resample("H", on='timestamp').mean().reset_index()
+    hourly_price_data = full_price_data.resample("H", on='timestamp').mean().reset_index()
 
     # Display the second graph for the full period sine wave
     # plot_sine_wave_full_period(sine_wave_df)
 
     # Plot the daily price data
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=daily_price_data['timestamp'], y=daily_price_data['price'], mode='lines', name='Daily Price'))
+    fig.add_trace(go.Scatter(x=hourly_price_data['timestamp'], y=hourly_price_data['price'], mode='lines', name='Daily Price'))
     fig.update_layout(
         title="Daily Price Data",
         xaxis_title="Time",
@@ -310,7 +478,7 @@ def main() -> None:
         template="plotly_dark"
     )
     fig.show()
-    logger.debug(__file__, main.__name__, "Completed plot generation for daily price data.")
+    logger.info(__file__, main.__name__, "Completed plot generation for daily price data.")
 
 if __name__ == "__main__":
     main()
