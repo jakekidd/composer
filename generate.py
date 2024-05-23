@@ -105,9 +105,9 @@ def generate_price_data(start_price: float, start_time: int, end_time: int, vola
 
     return price_data
 
-def display_combined_plots(price_data: pd.DataFrame, sine_wave_df: pd.DataFrame, start_time: int, end_time: int) -> None:
+def plot_price_and_sine_wave_chunk(price_data: pd.DataFrame, sine_wave_df: pd.DataFrame, start_time: int, end_time: int) -> None:
     """
-    Display combined plots of price data and sine wave.
+    Plot price data and sine wave chunk.
 
     Args:
         price_data (pd.DataFrame): Generated price data.
@@ -115,9 +115,7 @@ def display_combined_plots(price_data: pd.DataFrame, sine_wave_df: pd.DataFrame,
         start_time (int): Start timestamp in UTC seconds.
         end_time (int): End timestamp in UTC seconds.
     """
-    num_plots = 3  # Including sine wave plot and price data plot
-
-    fig = make_subplots(rows=num_plots, cols=1, shared_xaxes=True, vertical_spacing=0.02)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02)
 
     # Plot price data
     fig.add_trace(
@@ -125,21 +123,43 @@ def display_combined_plots(price_data: pd.DataFrame, sine_wave_df: pd.DataFrame,
         row=1, col=1
     )
 
-    # Plot sine wave
+    # Plot sine wave for the chunk on the same x-axis as price data
     sine_wave_section = sine_wave_df[(sine_wave_df['timestamp'] >= pd.to_datetime(start_time, unit='s')) &
                                      (sine_wave_df['timestamp'] <= pd.to_datetime(end_time, unit='s'))]
 
     fig.add_trace(
-        go.Scatter(x=sine_wave_section['timestamp'], y=sine_wave_section['sine_wave'], mode='lines', name='Sine Wave'),
+        go.Scatter(x=sine_wave_section['timestamp'], y=sine_wave_section['sine_wave'], mode='lines', name='Sine Wave Chunk'),
         row=2, col=1
     )
 
     fig.update_layout(
-        title="Generated Price Data and Sine Wave",
+        title="Price Data and Sine Wave Chunk",
         xaxis_title="Time (UTC seconds)",
         yaxis_title="Value",
         template="plotly_dark",
-        height=300 * num_plots  # Adjust height based on the number of plots
+        height=600  # Adjust height based on the number of plots
+    )
+
+    fig.show()
+
+def plot_sine_wave_full_period(sine_wave_df: pd.DataFrame) -> None:
+    """
+    Plot the sine wave for the full period.
+
+    Args:
+        sine_wave_df (pd.DataFrame): DataFrame containing the sine wave for bear/bull cycles.
+    """
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(x=sine_wave_df['timestamp'], y=sine_wave_df['sine_wave'], mode='lines', name='Sine Wave Full Period')
+    )
+
+    fig.update_layout(
+        title="Sine Wave Full Period",
+        xaxis_title="Time",
+        yaxis_title="Sine Wave Value",
+        template="plotly_dark"
     )
 
     fig.show()
@@ -153,24 +173,27 @@ def main() -> None:
 
     # Generate price data in chunks
     current_time = start_time
-    token_config = TOKENS["tokens"][0]
-    start_price = token_config["initial_price"]
+    start_price = TOKENS["tokens"][0]["initial_price"]
 
     while current_time < end_time:
         next_time = current_time + CHUNK_SIZE
         if next_time > end_time:
             next_time = end_time
 
+        token_config = TOKENS["tokens"][0]
 
-        price_data = generate_price_data(start_price, current_time, next_time, token_config["volatility"], sine_wave_df)
+        price_data = generate_price_data(start_price, current_time, next_time, TOKENS["tokens"][0]["volatility"], sine_wave_df)
 
         # TODO: Save price_data to database.
 
-        start_price = price_data["price"].iloc[-1]
+        start_price = price_data['price'].iloc[-1]
         current_time = next_time
 
-        # Display combined plots.
-        display_combined_plots(price_data, sine_wave_df, current_time - CHUNK_SIZE, current_time)
+        # Display the first graph for price data and sine wave chunk
+        plot_price_and_sine_wave_chunk(price_data, sine_wave_df, current_time - CHUNK_SIZE, current_time)
+
+        # Display the second graph for the full period sine wave
+        plot_sine_wave_full_period(sine_wave_df)
 
         # For demonstration purposes, we will exit after one chunk.
         exit()
