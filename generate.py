@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 import random
+import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from src.composer.utils.factor import Factor
 
 # Constants.
 TIME_INTERVAL = "S"  # Interval between data points.
@@ -20,112 +20,126 @@ TOKENS = {
             "volatility": 0.001,
             "popularity": 1.0,
             "factors": [
-                {
-                    "name": "valuation",
-                    "weight": 0.5,
-                    "sine": {
-                        "frequency": 2.0,  # This can be used as a scaling factor for amplitude or other properties
-                        "amplitude": 5.0,
-                        "slope": 10.0,
-                        "noise": 2.0,
-                        "period_days": 30  # Period in days
-                    }
-                }
+                # {
+                #     "name": "valuation",
+                #     "weight": 0.5,
+                #     "sine": {
+                #         "frequency": 2.0,
+                #         "amplitude": 5.0,
+                #         "slope": 10.0,
+                #         "noise": 2.0,
+                #         "period_days": 30  # Period in days
+                #     }
+                # }
             ]
         }
     ]
 }
 
-def generate_price_data(start_price: float, start_time: int, end_time: int, volatility: float, factors_config: list):
+def generate_sine_wave(start_time: int, end_time: int, frequency: float = 1 / (14 * 30.44)) -> pd.DataFrame:
     """
-    Generate price data using a random walk influenced by factors.
+    Generate a sine wave representing bear/bull cycles.
+
+    Args:
+        start_time (int): Start timestamp in UTC seconds.
+        end_time (int): End timestamp in UTC seconds.
+        frequency (float): Frequency of the sine wave. Default is 1 cycle per 14 months.
+
+    Returns:
+        pd.DataFrame: DataFrame with daily timestamps and normalized sine wave values between -1.0 and 1.0.
+    """
+    # Generate daily timestamps
+    periods = pd.date_range(
+        start=pd.to_datetime(start_time, unit='s'),
+        end=pd.to_datetime(end_time, unit='s'),
+        freq='D'
+    )
+
+    # Generate the sine wave
+    t = np.arange(len(periods))
+    sine_wave = np.sin(2 * np.pi * frequency * t)
+
+    # Normalize the sine wave between -1.0 and 1.0
+    sine_wave = (sine_wave - sine_wave.min()) / (sine_wave.max() - sine_wave.min()) * 2 - 1
+
+    # Create DataFrame
+    sine_wave_df = pd.DataFrame({'timestamp': periods, 'sine_wave': sine_wave})
+    return sine_wave_df
+
+def generate_price_data(start_price: float, start_time: int, end_time: int, volatility: float, sine_wave_df: pd.DataFrame):
+    """
+    Generate price data using a random walk influenced by a bear/bull cycle sine wave.
 
     Args:
         start_price (float): Starting price.
         start_time (int): Start timestamp in UTC seconds.
         end_time (int): End timestamp in UTC seconds.
-        volatility (float): 
-        factors_config (list): List of factor configurations.
+        volatility (float): Base volatility.
+        sine_wave_df (pd.DataFrame): DataFrame containing the sine wave for bear/bull cycles.
 
     Returns:
         pd.DataFrame: Generated price data.
-        list: List of Factor objects.
     """
     periods = pd.date_range(
         start=pd.to_datetime(start_time, unit='s'),
         end=pd.to_datetime(end_time, unit='s'),
         freq=TIME_INTERVAL
-    )[:-1] # Remove the last period to match the length of prices and factor_wave.
+    )[:-1]  # Remove the last period to match the length of prices
+
     prices = [start_price]
 
-    # Initialize factors.
-    factors = []
-    for config in factors_config:
-        factor = Factor(config['name'], start_time, end_time, config['weight'])
-        if 'sine' in config:
-            sine_config = config['sine']
-            factor.generate_sine(frequency=sine_config['frequency'], amplitude=sine_config['amplitude'], 
-                                 slope=sine_config['slope'], noise_level=sine_config['noise'], 
-                                 period_days=sine_config['period_days'], start_price=start_price)
-        factors.append(factor)
+    # Generate random walk
+    for current_time in periods[1:]:
+        current_day = current_time.floor('D')
+        sine_value = sine_wave_df.loc[sine_wave_df['timestamp'] == current_day, 'sine_wave'].values[0]
+        adjusted_volatility = volatility * (1 + sine_value)  # Adjust volatility based on sine wave
 
-    # Generate random walk.
-    for _ in range(1, len(periods)):
-        change = random.gauss(0, volatility)    # Random change based on volume.
+        change = random.gauss(0, adjusted_volatility)
         price = prices[-1] * (1 + change)
         prices.append(price)
 
     prices = np.array(prices[:len(periods)])
 
-    # Apply factors to the price data.
-    # for factor in factors:
-    #     factor_wave = factor.data[:len(prices)]                 # Ensuring length matches prices length.
-    #     adjusted_wave = 1 + (factor_wave - 1) * factor.weight   # Alter the factor wave based on weights.
-    #     prices = prices * adjusted_wave                         # Slice prices to match the length of factor_wave.
-
-    # Convert to DataFrame.
+    # Convert to DataFrame
     price_data = pd.DataFrame({'timestamp': periods.astype(int) // 10**9, 'price': prices})
 
-    return price_data, factors
+    return price_data
 
-def display_combined_plots(price_data: pd.DataFrame, factors: list) -> None:
+def display_combined_plots(price_data: pd.DataFrame, sine_wave_df: pd.DataFrame, start_time: int, end_time: int) -> None:
     """
-    Display combined plots of price data and factors.
+    Display combined plots of price data and sine wave.
 
     Args:
         price_data (pd.DataFrame): Generated price data.
-        factors (list): List of Factor objects.
+        sine_wave_df (pd.DataFrame): DataFrame containing the sine wave for bear/bull cycles.
+        start_time (int): Start timestamp in UTC seconds.
+        end_time (int): End timestamp in UTC seconds.
     """
-    num_plots = len(factors) + 2  # Including aggregated factors plot and price data plot.
+    num_plots = 3  # Including sine wave plot and price data plot
 
     fig = make_subplots(rows=num_plots, cols=1, shared_xaxes=True, vertical_spacing=0.02)
 
-    # Plot price data.
+    # Plot price data
     fig.add_trace(
         go.Scatter(x=price_data['timestamp'], y=price_data['price'], mode='lines', name='Price'),
         row=1, col=1
     )
 
-    # Plot aggregated factors.
-    aggregated_factors = np.sum([factor.data[:len(price_data)] * factor.weight for factor in factors], axis=0)
+    # Plot sine wave
+    sine_wave_section = sine_wave_df[(sine_wave_df['timestamp'] >= pd.to_datetime(start_time, unit='s')) &
+                                     (sine_wave_df['timestamp'] <= pd.to_datetime(end_time, unit='s'))]
+
     fig.add_trace(
-        go.Scatter(x=price_data['timestamp'], y=aggregated_factors, mode='lines', name='Aggregated Factors'),
+        go.Scatter(x=sine_wave_section['timestamp'], y=sine_wave_section['sine_wave'], mode='lines', name='Sine Wave'),
         row=2, col=1
     )
 
-    # Plot individual factors.
-    for i, factor in enumerate(factors, start=3):
-        fig.add_trace(
-            go.Scatter(x=price_data['timestamp'], y=factor.data[:len(price_data)], mode='lines', name=factor.name),
-            row=i, col=1
-        )
-
     fig.update_layout(
-        title="Generated Price Data and Factors",
+        title="Generated Price Data and Sine Wave",
         xaxis_title="Time (UTC seconds)",
         yaxis_title="Value",
         template="plotly_dark",
-        height=300 * num_plots  # Adjust height based on the number of plots.
+        height=300 * num_plots  # Adjust height based on the number of plots
     )
 
     fig.show()
@@ -134,27 +148,31 @@ def main() -> None:
     start_time = TOKENS["start"]
     end_time = TOKENS["end"]
 
-    # TODO: for token in TOKENS["tokens"]:
+    # Generate sine wave for bear/bull cycles
+    sine_wave_df = generate_sine_wave(start_time, end_time)
+
+    # Generate price data in chunks
     current_time = start_time
-    start_price = TOKENS["tokens"][0]["initial_price"]
+    token_config = TOKENS["tokens"][0]
+    start_price = token_config["initial_price"]
 
     while current_time < end_time:
         next_time = current_time + CHUNK_SIZE
         if next_time > end_time:
             next_time = end_time
 
-        token_config = TOKENS["tokens"][0]
-        factors_config = token_config["factors"]
 
-        price_data, factors = generate_price_data(start_price, current_time, next_time, TOKENS["tokens"][0]["volatility"], factors_config)
+        price_data = generate_price_data(start_price, current_time, next_time, token_config["volatility"], sine_wave_df)
 
         # TODO: Save price_data to database.
 
-        start_price = price_data['price'].iloc[-1]
+        start_price = price_data["price"].iloc[-1]
         current_time = next_time
 
         # Display combined plots.
-        display_combined_plots(price_data, factors)
+        display_combined_plots(price_data, sine_wave_df, current_time - CHUNK_SIZE, current_time)
+
+        # For demonstration purposes, we will exit after one chunk.
         exit()
 
 if __name__ == "__main__":
