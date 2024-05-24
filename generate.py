@@ -26,19 +26,8 @@ TOKENS = {
             "initial_price": 10.00,
             "volatility": 0.001,
             "popularity": 1.0,
-            "factors": [
-                # {
-                #     "name": "valuation",
-                #     "weight": 0.5,
-                #     "sine": {
-                #         "frequency": 2.0,
-                #         "amplitude": 5.0,
-                #         "slope": 10.0,
-                #         "noise": 2.0,
-                #         "period_days": 30  # Period in days
-                #     }
-                # }
-            ]
+            "total_tokens": 1000000,
+            "factors": []
         }
     ]
 }
@@ -109,8 +98,6 @@ def generate_factors_wave(start_time: int, end_time: int, base_wave: pd.DataFram
     valuation_wave = valuation['amplitude'] * np.sin(frequency * t) + valuation['slope'] * 15.0 * t / len(t)
 
     # Add noise to the valuation wave
-    # noise = np.random.normal(0, 0.01, len(valuation_wave))  # Adjust noise level as needed # *
-    # valuation_wave += noise
     noise_level = 2.0  # Adjust noise level as needed
     noise = np.random.normal(0, noise_level, len(valuation_wave))
     valuation_wave += noise
@@ -128,7 +115,6 @@ def generate_factors_wave(start_time: int, end_time: int, base_wave: pd.DataFram
     # Normalize the summed wave between -1 and 1
     min_value = np.min(combined_wave['combined_wave'].values)  # Find the minimum value in the combined_wave
     max_value = np.max(combined_wave['combined_wave'].values)
-    # combined_wave['combined_wave'] += abs(min_value)  # Raise the combined_wave by the minimum value
     combined_wave['combined_wave'] = 2 * (combined_wave['combined_wave'] - min_value) / (max_value - min_value) - 1
 
     # Plot the waves
@@ -219,45 +205,21 @@ def generate_price_data(original_price: float, start_price: float, start_time: i
     progress = 0
 
     # Precompute combined wave values for efficiency
-    combined_wave_dict = combined_wave_df.set_index('timestamp')['combined_wave'].to_dict()
+    # combined_wave_dict = combined_wave_df.set_index('timestamp')['combined_wave'].to_dict()
 
     # Generate random walk
     for i, current_time in enumerate(periods[1:], start=1):
-        # current_day = current_time.floor('D')
-        # sine_value = sine_wave_df.loc[sine_wave_df['timestamp'] == current_day, 'sine_wave'].values[0]
-
-        # adjusted_volatility = volatility * (1 + sine_value)  # Adjust volatility based on sine wave
-        # Reverse the effect: less std. deviation in bull (sine_value > 0), more in bear (sine_value < 0)
-        # adjusted_volatility = volatility * (1 - sine_value)
-
-        # trend = 0.0001 * sine_value  # Base trend adjustment based on sine wave # *
-        # adjusted_volatility = volatility * (1 - abs(sine_value))  # Adjust volatility based on sine wave # *
-        # change = random.gauss(trend, adjusted_volatility)  # Use trend as the mean # *
-        # current_hour = current_time.floor('H')  # Use hourly granularity for combined_wave
-        # combined_value = combined_wave_df.loc[combined_wave_df['timestamp'] == current_hour, 'combined_wave'].values[0]
-
+        last_price = prices[-1]
         # current_hour = current_time.floor('H')  # Use hourly granularity for combined_wave
         # combined_value = combined_wave_dict.get(current_hour, 0)
 
-        # trend = 0.0001 * combined_value  # Base trend adjustment based on combined wave
-        # adjusted_volatility = volatility #* (1 - abs(combined_value))  # Adjust volatility based on combined wave
-        # change = random.gauss(0, volatility)
-        # price = prices[-1] * (1 + change)
-        # price += combined_value * (original_price / 10.0) # TODO: Use the original value scale.
-        # prices.append(price)
-
-        last_price = prices[-1]
-        current_hour = current_time.floor('H')  # Use hourly granularity for combined_wave
-        combined_value = combined_wave_dict.get(current_hour, 0)
-
-        trend = calculate_trend(combined_value, original_price, last_price)
-        # adjusted_volatility = volatility * (1 + (last_price / (last_price + 1e-5)))
-        change = random.gauss(trend, 6.52e-04)# 0.005)
+        # trend = calculate_trend(combined_value, original_price, last_price)
+        # mean_price = 10.0  # Long-term mean price
+        # change = random.gauss(1.35e-06, 6.52e-04) #+ 0.01 * (mean_price - last_price) mean reversion as needed
+        change = random.gauss(1.35e-06, 3e-04)#1.35e-06)# 6.52e-05)  # Adjust volatility as needed
         price = last_price * (1 + change)
-        # price += combined_value * (original_price / 10.0) # TODO: Use the original value scale.
         prices.append(price)
-        # if len(prices) % (24 * 3600) == 0:  # Log progress every day
-        #     logger.debug(__file__, generate_price_data.__name__, f"Generated price data for {len(prices) // (24 * 3600)} days.")
+
         if i % 3600 == 0:  # Update every hour
             spinner_index = (spinner_index + 1) % len(spinner)
             progress += hourly_increment
@@ -275,27 +237,107 @@ def generate_price_data(original_price: float, start_price: float, start_time: i
     logger.info(__file__, generate_price_data.__name__, f"Generated price data. Took: {int(time.time() - method_start_time)}s.")
     return price_data
 
-def apply_combined_wave_to_price_data(price_data: pd.DataFrame, combined_wave_df: pd.DataFrame) -> pd.DataFrame:
+def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFrame:
     """
-    Apply the combined wave influence to the finalized price data.
+    Convert price data to OHLCV data.
 
     Args:
-        price_data (pd.DataFrame): DataFrame containing the finalized price data with 1-second granularity.
-        combined_wave_df (pd.DataFrame): DataFrame containing the combined wave with 1-hour granularity.
+        price_data (pd.DataFrame): DataFrame containing price data with columns ['timestamp', 'price'].
+        token_config (dict): Configuration dictionary for the token.
 
     Returns:
-        pd.DataFrame: Updated price data with combined wave influence applied.
+        pd.DataFrame: DataFrame containing OHLCV data with columns ['timestamp', 'open', 'high', 'low', 'close', 'volume'].
     """
-    price_data = price_data.copy()  # To avoid modifying the original DataFrame
-    combined_wave_dict = combined_wave_df.set_index('timestamp')['combined_wave'].to_dict()
+    logger.info(__file__, convert_to_ohlcv.__name__, "Converting price data to OHLCV data.")
+    
+    # Calculate market cap
+    total_tokens = token_config["total_tokens"]
+    market_caps = price_data['price'] * total_tokens
 
-    # Apply combined wave influence
-    for i, row in price_data.iterrows():
-        current_hour = row['timestamp'] // 3600 * 3600  # Align to the nearest hour
-        combined_value = combined_wave_dict.get(current_hour, 0)
-        price_data.at[i, 'price'] += combined_value * (row['price'] * 9.9)
+    ohlcv_data = {
+        'timestamp': [],
+        'open': [],
+        'high': [],
+        'low': [],
+        'close': [],
+        'volume': []
+    }
 
-    return price_data
+    prices = price_data['price'].values
+    timestamps = price_data['timestamp'].values
+
+    # Initialize the first data point
+    ohlcv_data['timestamp'].append(timestamps[0])
+    ohlcv_data['open'].append(prices[0])
+    ohlcv_data['close'].append(prices[1])
+    ohlcv_data['high'].append(max(prices[0], prices[1]))
+    ohlcv_data['low'].append(min(prices[0], prices[1]))
+    ohlcv_data['volume'].append(market_caps[0] * 0.001)  # Use a small volume for the initial point
+
+    for i in range(1, len(prices) - 1):
+        open_price = ohlcv_data['close'][-1]
+        close_price = prices[i + 1]
+
+        high_price = open_price + random.uniform(0, abs(close_price - open_price) * 1.2)
+        low_price = open_price - random.uniform(0, abs(open_price - close_price) * 1.2)
+        high_price = max(high_price, close_price)
+        low_price = min(low_price, close_price)
+
+        volume = market_caps[i] * 0.001 + abs(open_price - close_price) * total_tokens * 0.01
+
+        ohlcv_data['timestamp'].append(timestamps[i])
+        ohlcv_data['open'].append(open_price)
+        ohlcv_data['close'].append(close_price)
+        ohlcv_data['high'].append(high_price)
+        ohlcv_data['low'].append(low_price)
+        ohlcv_data['volume'].append(volume)
+
+    # Handle the last data point
+    ohlcv_data['timestamp'].append(timestamps[-1])
+    ohlcv_data['open'].append(ohlcv_data['close'][-1])
+    ohlcv_data['close'].append(prices[-1])
+    ohlcv_data['high'].append(max(prices[-1], ohlcv_data['open'][-1]))
+    ohlcv_data['low'].append(min(prices[-1], ohlcv_data['open'][-1]))
+    ohlcv_data['volume'].append(market_caps[-1] * 0.001)
+
+    return pd.DataFrame(ohlcv_data)
+
+def plot_ohlcv_data(ohlcv_data: pd.DataFrame) -> None:
+    """
+    Plot OHLCV data.
+
+    Args:
+        ohlcv_data (pd.DataFrame): DataFrame containing OHLCV data with columns ['timestamp', 'open', 'high', 'low', 'close', 'volume'].
+    """
+    logger.debug(__file__, "plot_ohlcv_data", "Generating plot for OHLCV data.")
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, specs=[[{"type": "candlestick"}], [{"type": "bar"}]])
+
+    fig.add_trace(
+        go.Candlestick(
+            x=ohlcv_data['timestamp'],
+            open=ohlcv_data['open'],
+            high=ohlcv_data['high'],
+            low=ohlcv_data['low'],
+            close=ohlcv_data['close'],
+            name='OHLC'
+        ),
+        row=1, col=1
+    )
+
+    fig.add_trace(
+        go.Bar(x=ohlcv_data['timestamp'], y=ohlcv_data['volume'], name='Volume'),
+        row=2, col=1
+    )
+
+    fig.update_layout(
+        title="OHLCV Data",
+        xaxis_title="Time",
+        yaxis_title="Price/Volume",
+        template="plotly_dark",
+        height=900  # Adjust height based on the number of plots
+    )
+
+    fig.show()
 
 def plot_price_and_sine_wave_chunk(price_data: pd.DataFrame, sine_wave_df: pd.DataFrame, start_time: int, end_time: int) -> None:
     """
@@ -419,7 +461,7 @@ def main() -> None:
     # Initialize token table
     token_config = TOKENS["tokens"][0]
     # Set the token in Atlas before accessing token-specific methods
-    atlas.token = token_config["name"]  # Add this line
+    atlas.token = token_config["name"]
     atlas.create_token_table(token_config["name"])
     atlas.set_token_initial(token_config["initial_price"], token_config["volatility"], token_config["popularity"])
     logger.debug(__file__, main.__name__, "Token table initialized as needed and initial configuration set.")
@@ -472,7 +514,6 @@ def main() -> None:
 
         logger.info(__file__, main.__name__, f"Price data chunk saved for period {utc_to_formatted(current_time - CHUNK_SIZE)} to {utc_to_formatted(current_time)}.")
 
-
     # Retrieve the full price data and convert to daily datapoints
     full_price_data = atlas.get_token_price()
     # logger.info(__file__, main.__name__, f"Applying combined factor wave to price data...")
@@ -487,9 +528,6 @@ def main() -> None:
     # hourly_price_data = updated_price_data.resample("H", on='timestamp').mean().reset_index()
     hourly_price_data = full_price_data.resample("H", on='timestamp').mean().reset_index()
 
-    # Display the second graph for the full period sine wave
-    # plot_sine_wave_full_period(sine_wave_df)
-
     # Plot the daily price data
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=hourly_price_data['timestamp'], y=hourly_price_data['price'], mode='lines', name='Daily Price'))
@@ -501,6 +539,15 @@ def main() -> None:
     )
     fig.show()
     logger.info(__file__, main.__name__, "Completed plot generation for daily price data.")
+
+    # Convert price data to OHLCV data
+    ohlcv_data = convert_to_ohlcv(hourly_price_data, token_config)
+    atlas.append_token_ohlcv(ohlcv_data)
+    
+    # Plot the OHLCV data
+    plot_ohlcv_data(ohlcv_data)
+
+    logger.info(__file__, main.__name__, "Completed plot generation for OHLCV data.")
 
 if __name__ == "__main__":
     main()
