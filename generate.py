@@ -16,7 +16,8 @@ CHUNK_SIZE = 5 * 24 * 60 * 60  # 5 days in seconds.
 
 TOKENS = {
     "start": 1577836800,  # UTC timestamp for 2020-01-01 00:00:00
-    "end": 1580515200,  # UTC timestamp for 2020-02-01 00:00:00
+    "end": 1735689600,  # UTC timestamp for 2025-01-01 00:00:00
+    # "end": 1580515200,  # UTC timestamp for 2020-02-01 00:00:00
     # "end": 1583020800,  # UTC timestamp for 2020-04-01 00:00:00
     "stable": "USDC",
     "tokens": [
@@ -104,10 +105,6 @@ def generate_factors_wave(start_time: int, end_time: int, base_wave: pd.DataFram
     # Generate the base sine wave for the full period
     base_period = 1 # 1 day periodicity.
     t = np.arange(len(periods))
-    # frequency = valuation['frequency'] * (2 * np.pi / (base_period * 24))  # Assume 30 days as a base period # *
-    # valuation_wave = valuation['amplitude'] * np.sin(frequency * t) + valuation['slope'] * t / len(t) # *
-    # valuation_wave = valuation['amplitude'] * (np.sin(frequency * t) + valuation['slope'] * t / len(t))
-    t = np.arange(len(periods))
     frequency = valuation['frequency'] * (2 * np.pi / (base_period * 24))  # Assume 30 days as a base period
     valuation_wave = valuation['amplitude'] * np.sin(frequency * t) + valuation['slope'] * 15.0 * t / len(t)
 
@@ -166,6 +163,28 @@ def generate_factors_wave(start_time: int, end_time: int, base_wave: pd.DataFram
 
     return combined_wave
 
+def calculate_trend(combined_value: float, original_price: float, current_price: float) -> float:
+    """
+    Calculate the trend based on the combined wave value, original price, and current price.
+    The trend is adjusted to flatten out as the current price approaches 0.10.
+
+    Args:
+        combined_value (float): The combined wave value.
+        original_price (float): The original starting price at the beginning of the total period.
+        current_price (float): The current price.
+
+    Returns:
+        float: The calculated trend.
+    """
+    # Calculate base trend based on combined value and original price
+    trend = combined_value ** 2 * 1.35e-07 * original_price
+
+    # Adjust trend as the current price approaches 0.10
+    if current_price < 0.2:  # Start flattening out when price is below 0.2
+        factor = (current_price - 0.10) / 0.10  # Normalize between 0 and 1 as price approaches 0.10
+        trend *= factor  # Reduce the trend as the price approaches 0.10
+    return trend
+
 def generate_price_data(original_price: float, start_price: float, start_time: int, end_time: int, volatility: float, combined_wave_df: pd.DataFrame):
     """
     Generate price data using a random walk influenced by a bear/bull cycle sine wave.
@@ -200,7 +219,7 @@ def generate_price_data(original_price: float, start_price: float, start_time: i
     progress = 0
 
     # Precompute combined wave values for efficiency
-    # combined_wave_dict = combined_wave_df.set_index('timestamp')['combined_wave'].to_dict()
+    combined_wave_dict = combined_wave_df.set_index('timestamp')['combined_wave'].to_dict()
 
     # Generate random walk
     for i, current_time in enumerate(periods[1:], start=1):
@@ -228,8 +247,12 @@ def generate_price_data(original_price: float, start_price: float, start_time: i
         # prices.append(price)
 
         last_price = prices[-1]
+        current_hour = current_time.floor('H')  # Use hourly granularity for combined_wave
+        combined_value = combined_wave_dict.get(current_hour, 0)
+
+        trend = calculate_trend(combined_value, original_price, last_price)
         # adjusted_volatility = volatility * (1 + (last_price / (last_price + 1e-5)))
-        change = random.gauss(1.35e-08, 6.52e-05)# 0.005)
+        change = random.gauss(trend, 6.52e-04)# 0.005)
         price = last_price * (1 + change)
         # price += combined_value * (original_price / 10.0) # TODO: Use the original value scale.
         prices.append(price)
@@ -383,16 +406,15 @@ def main() -> None:
         logger.warn(__file__, main.__name__, f"Catalog stable {stable} != configured stable {configured_stable}.", Atlas.__name__)
     if start_time != TOKENS["start"]:
         configured_start = TOKENS["start"]
-        logger.error(__file__, main.__name__, f"Catalog start time {utc_to_formatted(start_time)} != configured chunk size {utc_to_formatted(configured_start)}. Exiting.", Atlas.__name__)
+        logger.error(__file__, main.__name__, f"Catalog start time {utc_to_formatted(start_time)} != configured start time {utc_to_formatted(configured_start)}. Exiting.", Atlas.__name__)
         exit()
     if end_time != TOKENS["end"]:
         configured_end = TOKENS["end"]
-        logger.error(__file__, main.__name__, f"Catalog chunk size {utc_to_formatted(end_time)} != configured chunk size {utc_to_formatted(configured_end)}. Exiting.", Atlas.__name__)
+        logger.error(__file__, main.__name__, f"Catalog end time {utc_to_formatted(end_time)} != configured end time {utc_to_formatted(configured_end)}. Exiting.", Atlas.__name__)
         exit()
 
-
     # Display the second graph for the full period sine wave
-    plot_sine_wave_full_period(cycle_wave_df)
+    # plot_sine_wave_full_period(cycle_wave_df)
 
     # Initialize token table
     token_config = TOKENS["tokens"][0]
