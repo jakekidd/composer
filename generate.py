@@ -16,9 +16,9 @@ CHUNK_SIZE = 5 * 24 * 60 * 60  # 5 days in seconds.
 
 TOKENS = {
     "start": 1577836800,  # UTC timestamp for 2020-01-01 00:00:00
-    # "end": 1735689600,  # UTC timestamp for 2025-01-01 00:00:00
+    "end": 1735689600,  # UTC timestamp for 2025-01-01 00:00:00
     # "end": 1580515200,  # UTC timestamp for 2020-02-01 00:00:00
-    "end": 1583020800,  # UTC timestamp for 2020-04-01 00:00:00
+    # "end": 1583020800,  # UTC timestamp for 2020-04-01 00:00:00
     "stable": "USDC",
     "tokens": [
         {
@@ -139,7 +139,86 @@ def calculate_trend(combined_value: float, original_price: float, current_price:
         trend *= factor  # Reduce the trend as the price approaches 0.10
     return trend
 
-def generate_price_data(original_price: float, start_price: float, start_time: int, end_time: int, volatility: float, combined_wave_df: pd.DataFrame):
+def generate_ou_process_values(length: int, theta: float, mu: float, sigma: float, dt: float, initial_value: float) -> np.ndarray:
+    """
+    Generate values for an Ornstein-Uhlenbeck (OU) process.
+
+    Args:
+        length (int): Length of the time series.
+        theta (float): Speed of reversion to the mean.
+        mu (float): Long-term mean level.
+        sigma (float): Volatility parameter.
+        dt (float): Time increment.
+        initial_value (float): Initial value of the process.
+
+    Returns:
+        np.ndarray: Array of generated OU process values.
+    """
+    ou_values = np.zeros(length)
+    ou_values[0] = initial_value
+
+    for t in range(1, length):
+        ou_values[t] = ou_values[t-1] + theta * (mu - ou_values[t-1]) * dt + sigma * np.sqrt(dt) * np.random.normal()
+        # Clip the OU values to avoid extreme values
+        ou_values[t] = np.clip(ou_values[t], -np.inf, np.inf)  # You can adjust the clipping range if necessary
+        # Log each step for debugging
+        # logger.debug(__file__, "generate_ou_process_values", f"OU Value at t={t}: {ou_values[t]}")
+
+    return ou_values
+
+    # Log input values for debugging
+    # logger.debug(__file__, "generate_ou_process_values", f"last_price: {last_price}, theta: {theta}, mu: {mu}, sigma: {sigma}, dt: {dt}")
+
+    # # Calculate the OU process value
+    # mean_reversion_term = theta * (mu - last_price)
+    # stochastic_term = sigma * np.sqrt(dt) * np.random.normal()
+
+    # # Log terms for debugging
+    # # logger.debug(__file__, "generate_ou_process_values", f"mean_reversion_term: {mean_reversion_term}, stochastic_term: {stochastic_term}")
+
+    # # Calculate the new price
+    # new_price = last_price + mean_reversion_term * dt + stochastic_term
+
+    # # Log the new price
+    # logger.debug(__file__, "generate_ou_process_values", f"mean_reversion_term: {mean_reversion_term}, stochastic_term: {stochastic_term}, new_price: {new_price}")
+
+    # return new_price
+
+def derive_ou_inputs(price_data: pd.DataFrame) -> dict:
+    """
+    Derive OU process parameters (theta, mu, sigma) from the recent price data.
+
+    Args:
+        price_data (pd.DataFrame): DataFrame containing recent price data with columns ['timestamp', 'price'].
+
+    Returns:
+        dict: Dictionary containing derived OU process parameters.
+    """
+    prices = price_data['price'].values
+    dt = 1 / (60 * 60)  # Time increment in hours
+
+    # Estimate mu as the mean of the prices
+    mu = np.mean(prices)
+
+    # Estimate theta using a simple method (negative slope of log of price differences)
+    log_prices = np.log(prices)
+    theta = -np.polyfit(np.arange(len(log_prices)), log_prices, 1)[0] / dt
+
+    # Estimate sigma as the standard deviation of the price differences
+    price_diffs = np.diff(prices)
+    sigma = np.std(price_diffs) / np.sqrt(dt)
+
+    return {"theta": theta, "mu": mu, "sigma": sigma}
+
+def generate_price_data(
+        original_price: float,
+        start_price: float,
+        start_time: int,
+        end_time: int,
+        ou_vars: dict,
+        volatility: float,
+        combined_wave_df: pd.DataFrame
+    ) -> pd.DataFrame:
     """
     Generate price data using a random walk influenced by a bear/bull cycle sine wave.
 
@@ -148,6 +227,7 @@ def generate_price_data(original_price: float, start_price: float, start_time: i
         start_price (float): Starting price.
         start_time (int): Start timestamp in UTC seconds.
         end_time (int): End timestamp in UTC seconds.
+        ou_vars (dict): "theta", "mu", "sigma" for OU calculation based on historical data.
         volatility (float): Base volatility.
         combined_wave_df (pd.DataFrame): DataFrame containing the aggregated external factors.
 
@@ -172,37 +252,59 @@ def generate_price_data(original_price: float, start_price: float, start_time: i
     hourly_increment = (3600 / total_seconds) * 100  # Increment percentage for each hour
     progress = 0
 
-    # Precompute combined wave values for efficiency
+    # Precompute combined wave values for efficiency.
     combined_wave_dict = combined_wave_df.set_index('timestamp')['combined_wave'].to_dict()
 
-    # Generate random walk
+    # Extract OU process parameters from ou_vars.
+    # theta = ou_vars.get('theta', 0.1)
+    # mu = ou_vars.get('mu', original_price)
+    # sigma = ou_vars.get('sigma', 0.01)
+
+    # Generate OU process values.
+    # dt = 1 / (60 * 60)  # Time increment in hours.
+    # ou_start_time = time.time()
+    # ou_process_values = generate_ou_process_values(len(periods), theta, mu, sigma, dt, start_price)
+    # logger.info(__file__, generate_price_data.__name__, f"Generated OU process values. Took: {int(time.time() - ou_start_time)}s.")
+
+    # Generate random walk.
     for i, current_time in enumerate(periods[1:], start=1):
         last_price = prices[-1]
-        current_hour = current_time.floor('H')  # Use hourly granularity for combined_wave
+        current_hour = current_time.floor('H')  # Use hourly granularity for combined_wave.
         combined_value = combined_wave_dict.get(current_hour, 0)
 
-        mean_price = combined_value  # Use the combined influence wave value as the mean price for mean reversion
+        mean_price = combined_value  # Use the combined influence wave value as the mean price for mean reversion.
         mean_reversion_coeff = 0.001
-        change = random.gauss(1e-07, 5e-04) + mean_reversion_coeff * (mean_price - last_price)
+        change = random.gauss(1e-07, volatility) + mean_reversion_coeff * (mean_price - last_price) #+ ou_process_values[i]
+        
+        # Clip the change to avoid overflow
+        change = np.clip(change, -1e2, 1e2)
+        
         price = last_price * (1 + change)
+        
+        # Check for overflow before calculation
+        if np.isinf(change) or np.isnan(change):
+            logger.error(__file__, generate_price_data.__name__, f"Overflow or NaN detected in change calculation: change={change}")
+            raise ValueError(f"Overflow or NaN detected in change calculation: change={change}")
+        
         prices.append(price)
 
-        if i % 3600 == 0:  # Update every hour
+        if i % 3600 == 0:  # Update every hour.
             spinner_index = (spinner_index + 1) % len(spinner)
             progress += hourly_increment
             bar = '=' * int(progress / 2) + ' ' * (50 - int(progress / 2))
-            sys.stdout.write(f"\rGenerating price data: [{bar}] {progress:.2f}% {spinner[spinner_index]}")
+            sys.stdout.write(f"\rGenerating price data: [{bar}] {progress:.2f}% {spinner[spinner_index]}")# OU Value: {ou_process_values[i]}")
             sys.stdout.flush()
             time.sleep(0.1)
     sys.stdout.write(f"\rGenerating price data: [==================================================] 100%         \n")
 
     prices = np.array(prices[:len(periods)])
 
-    # Convert to DataFrame
+    # Convert to DataFrame.
     price_data = pd.DataFrame({'timestamp': periods.astype(int) // 10**9, 'price': prices})
 
     logger.info(__file__, generate_price_data.__name__, f"Generated price data. Took: {int(time.time() - method_start_time)}s.")
     return price_data
+
 
 def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFrame:
     """
@@ -426,8 +528,7 @@ def main() -> None:
         logger.debug(__file__, main.__name__, "Combined wave data retrieved from database.", Atlas.__name__)
     except ValueError:
         combined_wave_df = generate_factors_wave(start_time, end_time, token_config["initial_price"], {
-            # TODO: Move this to config.
-            'slope': 0.01,
+            'slope': 0.001,
             'amplitude': 1.0,
             'frequency': 0.1
         })
@@ -451,39 +552,32 @@ def main() -> None:
         current_time = start_time
         logger.info(__file__, main.__name__, "Starting price data generation from the beginning (no previous data).")
 
+    ou_vars = {"theta": 0.1, "mu": token_config["initial_price"], "sigma": 0.01}  # Default OU parameters
+
     while current_time < end_time:
         next_time = current_time + CHUNK_SIZE
         if next_time > end_time:
             next_time = end_time
 
-        chunk_price_data = generate_price_data(token_config["initial_price"], start_price, current_time, next_time, token_config["volatility"], combined_wave_df)
+        chunk_price_data = generate_price_data(token_config["initial_price"], start_price, current_time, next_time, ou_vars, token_config["volatility"], combined_wave_df)
         atlas.append_token_price(chunk_price_data)
+
+        # Update OU parameters based on recent chunk
+        ou_vars = derive_ou_inputs(chunk_price_data)
 
         start_price = chunk_price_data['price'].iloc[-1]
         current_time = next_time
-
-        # Commenting out the chunk display for now
-        # plot_price_and_sine_wave_chunk(chunk_price_data, sine_wave_df, current_time - CHUNK_SIZE, current_time)
 
         logger.info(__file__, main.__name__, f"Price data chunk saved for period {utc_to_formatted(current_time - CHUNK_SIZE)} to {utc_to_formatted(current_time)}.")
 
     # Retrieve the full price data and convert to daily datapoints
     full_price_data = atlas.get_token_price()
-    # logger.info(__file__, main.__name__, f"Applying combined factor wave to price data...")
-    # apply_start_time = time.time()
-    # updated_price_data = apply_combined_wave_to_price_data(full_price_data, combined_wave_df)
-    # logger.info(__file__, main.__name__, f"Applied combined factor wave to price data. Took: {time.time() - apply_start_time}s")
-
     full_price_data['timestamp'] = pd.to_datetime(full_price_data['timestamp'], unit='s')
-    # updated_price_data['timestamp'] = pd.to_datetime(updated_price_data['timestamp'], unit='s')
-
-    # daily_price_data = full_price_data.resample('D', on='timestamp').mean().reset_index()
-    # hourly_price_data = updated_price_data.resample("H", on='timestamp').mean().reset_index()
     hourly_price_data = full_price_data.resample("H", on='timestamp').mean().reset_index()
 
-    # Plot the daily price data
+    # Plot the hourly price data
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=hourly_price_data['timestamp'], y=hourly_price_data['price'], mode='lines', name='Daily Price'))
+    fig.add_trace(go.Scatter(x=hourly_price_data['timestamp'], y=hourly_price_data['price'], mode='lines', name='Hourly Price'))
     fig.update_layout(
         title="Hourly Price Data",
         xaxis_title="Time",
@@ -491,12 +585,12 @@ def main() -> None:
         template="plotly_dark"
     )
     fig.show()
-    logger.info(__file__, main.__name__, "Completed plot generation for daily price data.")
+    logger.info(__file__, main.__name__, "Completed plot generation for hourly price data.")
 
     # Convert price data to OHLCV data
     ohlcv_data = convert_to_ohlcv(hourly_price_data, token_config)
     atlas.append_token_ohlcv(ohlcv_data)
-    
+
     # Plot the OHLCV data
     plot_ohlcv_data(ohlcv_data)
 
