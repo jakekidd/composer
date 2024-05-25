@@ -16,14 +16,14 @@ CHUNK_SIZE = 5 * 24 * 60 * 60  # 5 days in seconds.
 
 TOKENS = {
     "start": 1577836800,  # UTC timestamp for 2020-01-01 00:00:00
-    # "end": 1735689600,  # UTC timestamp for 2025-01-01 00:00:00
+    "end": 1735689600,  # UTC timestamp for 2025-01-01 00:00:00
     # "end": 1580515200,  # UTC timestamp for 2020-02-01 00:00:00
-    "end": 1583020800,  # UTC timestamp for 2020-04-01 00:00:00
+    # "end": 1583020800,  # UTC timestamp for 2020-04-01 00:00:00
     "stable": "USDC",
     "tokens": [
         {
             "name": "TEST",
-            "initial_price": 10.00,
+            "initial_price": 0.18, #10.00,
             "volatility": 0.001,
             "popularity": 1.0,
             "total_tokens": 1000000,
@@ -63,8 +63,9 @@ def generate_factors_wave(start_time: int, end_time: int, original_price: float,
     logger.debug(__file__, generate_factors_wave.__name__, f"Generating sine wave for bear/bull cycle from {utc_to_formatted(start_time)} to {utc_to_formatted(end_time)}.")
     frequency = 1 / (14 * 30.44 * 24)  # 1 cycle per 14 months, adjusted for hourly frequency.
     # Generate a random, gentle function to add some variation here. Not noise, but random.
-    variation = np.cumsum(np.random.normal(0, 0.7, len(t)))  # Cumulative sum to create gentle variation
+    variation = np.cumsum(np.random.normal(0, 0.09, len(t)))  # Cumulative sum to create gentle variation
     bear_bull_wave = (np.sin(2 * np.pi * frequency * t) + 1.5) * original_price + variation  # Between 0.5 and 2.0, scaled by original_price.
+    bear_bull_wave += abs(min(bear_bull_wave)) if min(bear_bull_wave) < 0 else 0
     logger.debug(__file__, generate_factors_wave.__name__, "Generated normalized sine wave for bear/bull cycle.")
 
     # Generate the valuation wave as a linear function starting at original price and increasing by slope.
@@ -78,6 +79,13 @@ def generate_factors_wave(start_time: int, end_time: int, original_price: float,
     # noise = np.random.normal(0, 0.2, len(t))  # Adjust noise level as needed
     variation = np.cumsum(np.random.normal(0, 0.3, len(t)))  # Cumulative sum to create gentle variation
     valuation_wave = linear_component + sine_component + variation
+    # Smooth out the valuation wave as it approaches 0
+    alpha = 0.1  # Smoothing factor (0 < alpha < 1)
+    for i in range(1, len(valuation_wave)):
+        if valuation_wave[i] < 0:
+            valuation_wave[i] = 0
+        else:
+            valuation_wave[i] = alpha * valuation_wave[i] + (1 - alpha) * valuation_wave[i - 1]
 
     # Create DataFrame for both waves.
     bear_bull_wave_df = pd.DataFrame({'timestamp': periods, 'bear_bull_wave': bear_bull_wave})
@@ -216,8 +224,7 @@ def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFra
         pd.DataFrame: DataFrame containing OHLCV data with columns ['timestamp', 'open', 'high', 'low', 'close', 'volume'].
     """
     logger.info(__file__, convert_to_ohlcv.__name__, "Converting price data to OHLCV data.")
-    
-    # Calculate market cap
+
     total_tokens = token_config["total_tokens"]
     market_caps = price_data['price'] * total_tokens
 
@@ -231,15 +238,21 @@ def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFra
     }
 
     prices = price_data['price'].values
-    timestamps = price_data['timestamp'].values
+    timestamps = price_data['timestamp'].astype(int) // 10**9  # Convert to Unix timestamp
 
-    # Initialize the first data point
+    logger.debug(__file__, convert_to_ohlcv.__name__, f"prices length: {len(prices)}, timestamps length: {len(timestamps)}")
+    logger.debug(__file__, convert_to_ohlcv.__name__, f"first timestamp: {timestamps[0]}, last timestamp: {timestamps[len(timestamps) - 1]}")
+    
+    if len(prices) < 2:
+        logger.error(__file__, convert_to_ohlcv.__name__, "Not enough price data to convert to OHLCV.")
+        return pd.DataFrame(ohlcv_data)
+
     ohlcv_data['timestamp'].append(timestamps[0])
     ohlcv_data['open'].append(prices[0])
     ohlcv_data['close'].append(prices[1])
     ohlcv_data['high'].append(max(prices[0], prices[1]))
     ohlcv_data['low'].append(min(prices[0], prices[1]))
-    ohlcv_data['volume'].append(market_caps[0] * 0.001)  # Use a small volume for the initial point
+    ohlcv_data['volume'].append(market_caps.iloc[0] * 0.001)
 
     for i in range(1, len(prices) - 1):
         open_price = ohlcv_data['close'][-1]
@@ -250,7 +263,7 @@ def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFra
         high_price = max(high_price, close_price)
         low_price = min(low_price, close_price)
 
-        volume = market_caps[i] * 0.001 + abs(open_price - close_price) * total_tokens * 0.01
+        volume = market_caps.iloc[i] * token_config["volatility"] + abs(open_price - close_price) * total_tokens * 0.05
 
         ohlcv_data['timestamp'].append(timestamps[i])
         ohlcv_data['open'].append(open_price)
@@ -259,15 +272,16 @@ def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFra
         ohlcv_data['low'].append(low_price)
         ohlcv_data['volume'].append(volume)
 
-    # Handle the last data point
-    ohlcv_data['timestamp'].append(timestamps[-1])
-    ohlcv_data['open'].append(ohlcv_data['close'][-1])
-    ohlcv_data['close'].append(prices[-1])
-    ohlcv_data['high'].append(max(prices[-1], ohlcv_data['open'][-1]))
-    ohlcv_data['low'].append(min(prices[-1], ohlcv_data['open'][-1]))
-    ohlcv_data['volume'].append(market_caps[-1] * 0.001)
+    if len(prices) > 1:
+        last_index = len(timestamps) - 1
+        ohlcv_data['timestamp'].append(timestamps[last_index])
+        ohlcv_data['open'].append(ohlcv_data['close'][-1])
+        ohlcv_data['close'].append(prices[-1])
+        ohlcv_data['high'].append(max(prices[-1], ohlcv_data['open'][-1]))
+        ohlcv_data['low'].append(min(prices[-1], ohlcv_data['open'][-1]))
+        ohlcv_data['volume'].append(market_caps.iloc[last_index] * 0.001)
 
-    return pd.DataFrame(ohlcv_data)
+    return pd.DataFrame(ohlcv_data).replace([np.inf, -np.inf], np.nan).dropna()
 
 def plot_ohlcv_data(ohlcv_data: pd.DataFrame) -> None:
     """
@@ -420,26 +434,28 @@ def main() -> None:
 
     # Generate or retrieve combined wave and save it to the database
     try:
-        combined_wave_df = atlas.get_token_factors()
-        if combined_wave_df.empty:
-            raise ValueError("No combined wave data found.")
-        logger.debug(__file__, main.__name__, "Combined wave data retrieved from database.", Atlas.__name__)
+        factors_wave_df = atlas.get_token_factors()
+        if factors_wave_df.empty:
+            raise ValueError("No factors wave data found.")
+        logger.debug(__file__, main.__name__, "Factors wave data retrieved from database.", Atlas.__name__)
     except ValueError:
-        combined_wave_df = generate_factors_wave(start_time, end_time, token_config["initial_price"], {
-            # TODO: Move this to config.
-            'slope': 0.01,
+        factors_wave_df = generate_factors_wave(start_time, end_time, token_config["initial_price"], {
+            'slope': 0.0,
             'amplitude': 1.0,
             'frequency': 0.1
         })
-        atlas.set_token_factors(combined_wave_df)
+        atlas.set_token_factors(factors_wave_df)
         logger.debug(__file__, main.__name__, "Generated and saved combined wave data.", Atlas.__name__)
 
-    # Retrieve the price data if it exists
     try:
-        price_data = atlas.get_token_price()
-        if not price_data.empty:
-            last_timestamp = price_data['timestamp'].iloc[-1]
-            start_price = price_data['price'].iloc[-1]
+        # Retrieve the latest price data point if it exists
+        latest_data = atlas.get_latest_price()
+        if latest_data is not None and not latest_data.empty:
+            last_timestamp = latest_data['timestamp'].iloc[-1]
+            if isinstance(last_timestamp, bytes):
+                print("Last ts in bytes...")
+                last_timestamp = int.from_bytes(last_timestamp, 'big')
+            start_price = latest_data['price'].iloc[-1]
             current_time = last_timestamp + 1  # Continue from the last timestamp
             logger.info(__file__, main.__name__, f"Continuing price data generation from timestamp {utc_to_formatted(last_timestamp)}.")
         else:
@@ -456,32 +472,24 @@ def main() -> None:
         if next_time > end_time:
             next_time = end_time
 
-        chunk_price_data = generate_price_data(token_config["initial_price"], start_price, current_time, next_time, token_config["volatility"], combined_wave_df)
+        chunk_price_data = generate_price_data(token_config["initial_price"], start_price, current_time, next_time, token_config["volatility"], factors_wave_df)
         atlas.append_token_price(chunk_price_data)
 
         start_price = chunk_price_data['price'].iloc[-1]
         current_time = next_time
 
-        # Commenting out the chunk display for now
-        # plot_price_and_sine_wave_chunk(chunk_price_data, sine_wave_df, current_time - CHUNK_SIZE, current_time)
-
         logger.info(__file__, main.__name__, f"Price data chunk saved for period {utc_to_formatted(current_time - CHUNK_SIZE)} to {utc_to_formatted(current_time)}.")
 
-    # Retrieve the full price data and convert to daily datapoints
+    logger.info(__file__, main.__name__, f"Price data generation complete.")
+
+    logger.info(__file__, main.__name__, "Retrieving full price data for complete period...")
+    retrieval_start = time.time()
     full_price_data = atlas.get_token_price()
-    # logger.info(__file__, main.__name__, f"Applying combined factor wave to price data...")
-    # apply_start_time = time.time()
-    # updated_price_data = apply_combined_wave_to_price_data(full_price_data, combined_wave_df)
-    # logger.info(__file__, main.__name__, f"Applied combined factor wave to price data. Took: {time.time() - apply_start_time}s")
+    logger.info(__file__, main.__name__, f"Retrieved full price data for complete period. Took: {time.time() - retrieval_start}s")
 
     full_price_data['timestamp'] = pd.to_datetime(full_price_data['timestamp'], unit='s')
-    # updated_price_data['timestamp'] = pd.to_datetime(updated_price_data['timestamp'], unit='s')
-
-    # daily_price_data = full_price_data.resample('D', on='timestamp').mean().reset_index()
-    # hourly_price_data = updated_price_data.resample("H", on='timestamp').mean().reset_index()
     hourly_price_data = full_price_data.resample("H", on='timestamp').mean().reset_index()
 
-    # Plot the daily price data
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=hourly_price_data['timestamp'], y=hourly_price_data['price'], mode='lines', name='Daily Price'))
     fig.update_layout(
@@ -491,14 +499,27 @@ def main() -> None:
         template="plotly_dark"
     )
     fig.show()
-    logger.info(__file__, main.__name__, "Completed plot generation for daily price data.")
+    logger.info(__file__, main.__name__, "Completed plot generation for hourly price data.")
 
-    # Convert price data to OHLCV data
-    ohlcv_data = convert_to_ohlcv(hourly_price_data, token_config)
-    atlas.append_token_ohlcv(ohlcv_data)
-    
-    # Plot the OHLCV data
-    plot_ohlcv_data(ohlcv_data)
+    # Convert price data to OHLCV data in chunks
+    current_start = 0
+    chunk_number = 0  # Added to differentiate chunks
+    while current_start < len(full_price_data):
+        current_end = min(current_start + CHUNK_SIZE, len(full_price_data))
+        chunk_data = full_price_data.iloc[current_start:current_end]
+
+        # Debugging statements
+        logger.info(__file__, main.__name__, f"Processing chunk {chunk_number} from index {current_start} to {current_end}.")
+        logger.info(__file__, main.__name__, f"Chunk {chunk_number} timestamps: {chunk_data['timestamp'].values}")
+        
+        ohlcv_data_chunk = convert_to_ohlcv(chunk_data, token_config)
+        print(ohlcv_data_chunk.dtypes)
+        print(ohlcv_data_chunk.head())
+        atlas.append_token_ohlcv(ohlcv_data_chunk)
+        plot_ohlcv_data(ohlcv_data_chunk)
+        
+        current_start = current_end
+        chunk_number += 1  # Increment chunk number
 
     logger.info(__file__, main.__name__, "Completed plot generation for OHLCV data.")
 

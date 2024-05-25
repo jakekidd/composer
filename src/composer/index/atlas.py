@@ -183,6 +183,22 @@ class Atlas:
             conn.commit()
         self.logger.debug(__file__, "set_token_price", f"Set new price data for token {self.token}.", Atlas.__name__)
 
+    def get_latest_price(self):
+        """
+        Retrieve the latest data point for the token.
+        """
+        query = f"SELECT timestamp, price FROM {self.token} ORDER BY timestamp DESC LIMIT 1"
+        self.logger.debug(__file__, "get_latest_price", f"Executing query: {query}")
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            result = cursor.fetchone()
+            if result:
+                latest_data = pd.DataFrame([result], columns=['timestamp', 'price'])
+                return latest_data
+            else:
+                return pd.DataFrame(columns=['timestamp', 'price'])
+
     def get_token_factors(self) -> pd.DataFrame:
         """
         Retrieve the factors data for a token from the database.
