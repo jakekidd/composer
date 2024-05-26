@@ -207,29 +207,19 @@ def generate_price_data(original_price: float, start_price: float, start_time: i
     prices = np.array(prices[:len(periods)])
 
     # Convert to DataFrame
-    price_data = pd.DataFrame({'timestamp': periods.astype(int) // 10**9, 'price': prices})
+    price_data = pd.DataFrame({'price_timestamp': periods.astype(int) // 10**9, 'price': prices})
 
     logger.info(__file__, generate_price_data.__name__, f"Generated price data. Took: {int(time.time() - method_start_time)}s.")
     return price_data
 
 def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFrame:
-    """
-    Convert price data to OHLCV data.
-
-    Args:
-        price_data (pd.DataFrame): DataFrame containing price data with columns ['timestamp', 'price'].
-        token_config (dict): Configuration dictionary for the token.
-
-    Returns:
-        pd.DataFrame: DataFrame containing OHLCV data with columns ['timestamp', 'open', 'high', 'low', 'close', 'volume'].
-    """
     logger.info(__file__, convert_to_ohlcv.__name__, "Converting price data to OHLCV data.")
 
     total_tokens = token_config["total_tokens"]
     market_caps = price_data['price'] * total_tokens
 
     ohlcv_data = {
-        'timestamp': [],
+        'ohlcv_timestamp': [],
         'open': [],
         'high': [],
         'low': [],
@@ -238,16 +228,24 @@ def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFra
     }
 
     prices = price_data['price'].values
-    timestamps = price_data['timestamp'].astype(int) // 10**9  # Convert to Unix timestamp
+    timestamps = price_data['price_timestamp'].values
 
     logger.debug(__file__, convert_to_ohlcv.__name__, f"prices length: {len(prices)}, timestamps length: {len(timestamps)}")
-    logger.debug(__file__, convert_to_ohlcv.__name__, f"first timestamp: {timestamps[0]}, last timestamp: {timestamps[len(timestamps) - 1]}")
-    
+    logger.debug(__file__, convert_to_ohlcv.__name__, f"first timestamp: {timestamps[0] if len(timestamps) > 0 else 'None'}, last timestamp: {timestamps[-1] if len(timestamps) > 0 else 'None'}")
+
     if len(prices) < 2:
         logger.error(__file__, convert_to_ohlcv.__name__, "Not enough price data to convert to OHLCV.")
         return pd.DataFrame(ohlcv_data)
 
-    ohlcv_data['timestamp'].append(timestamps[0])
+    # Spinner loading setup
+    spinner = ['|', '/', '―', '\\']
+    spinner_index = 0
+    total_data_points = len(prices)
+    increment = 100 / total_data_points
+    progress = 0
+
+    # Initialize the first data point
+    ohlcv_data['ohlcv_timestamp'].append(timestamps[0])
     ohlcv_data['open'].append(prices[0])
     ohlcv_data['close'].append(prices[1])
     ohlcv_data['high'].append(max(prices[0], prices[1]))
@@ -265,16 +263,26 @@ def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFra
 
         volume = market_caps.iloc[i] * token_config["volatility"] + abs(open_price - close_price) * total_tokens * 0.05
 
-        ohlcv_data['timestamp'].append(timestamps[i])
+        ohlcv_data['ohlcv_timestamp'].append(timestamps[i])
         ohlcv_data['open'].append(open_price)
         ohlcv_data['close'].append(close_price)
         ohlcv_data['high'].append(high_price)
         ohlcv_data['low'].append(low_price)
         ohlcv_data['volume'].append(volume)
 
+        # Update spinner and progress
+        if i % (total_data_points // 100) == 0:
+            spinner_index = (spinner_index + 1) % len(spinner)
+            progress += increment
+            bar = '=' * int(progress / 2) + ' ' * (50 - int(progress / 2))
+            sys.stdout.write(f"\rConverting to OHLCV data: [{bar}] {progress:.2f}% {spinner[spinner_index]}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+    sys.stdout.write(f"\rConverting to OHLCV data: [==================================================] 100%         \n")
+
     if len(prices) > 1:
         last_index = len(timestamps) - 1
-        ohlcv_data['timestamp'].append(timestamps[last_index])
+        ohlcv_data['ohlcv_timestamp'].append(timestamps[last_index])
         ohlcv_data['open'].append(ohlcv_data['close'][-1])
         ohlcv_data['close'].append(prices[-1])
         ohlcv_data['high'].append(max(prices[-1], ohlcv_data['open'][-1]))
@@ -283,19 +291,21 @@ def convert_to_ohlcv(price_data: pd.DataFrame, token_config: dict) -> pd.DataFra
 
     return pd.DataFrame(ohlcv_data).replace([np.inf, -np.inf], np.nan).dropna()
 
-def plot_ohlcv_data(ohlcv_data: pd.DataFrame) -> None:
+def plot_ohlcv_data(ohlcv_data: pd.DataFrame, price_data: pd.DataFrame) -> None:
     """
-    Plot OHLCV data.
+    Plot OHLCV data with volume overlay and price data overlay.
 
     Args:
-        ohlcv_data (pd.DataFrame): DataFrame containing OHLCV data with columns ['timestamp', 'open', 'high', 'low', 'close', 'volume'].
+        ohlcv_data (pd.DataFrame): DataFrame containing OHLCV data with columns ['ohlcv_timestamp', 'open', 'high', 'low', 'close', 'volume'].
+        price_data (pd.DataFrame): DataFrame containing price data with columns ['price_timestamp', 'price'].
     """
     logger.debug(__file__, "plot_ohlcv_data", "Generating plot for OHLCV data.")
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02, specs=[[{"type": "candlestick"}], [{"type": "bar"}]])
 
+    # Plot OHLC data
     fig.add_trace(
         go.Candlestick(
-            x=ohlcv_data['timestamp'],
+            x=ohlcv_data['ohlcv_timestamp'],
             open=ohlcv_data['open'],
             high=ohlcv_data['high'],
             low=ohlcv_data['low'],
@@ -305,8 +315,27 @@ def plot_ohlcv_data(ohlcv_data: pd.DataFrame) -> None:
         row=1, col=1
     )
 
+    # Overlay price data
     fig.add_trace(
-        go.Bar(x=ohlcv_data['timestamp'], y=ohlcv_data['volume'], name='Volume'),
+        go.Scatter(
+            x=price_data['price_timestamp'],
+            y=price_data['price'],
+            mode='lines',
+            name='Price',
+            line=dict(color='purple', width=2, dash='solid'),
+            opacity=0.5
+        ),
+        row=1, col=1
+    )
+
+    # Plot volume
+    fig.add_trace(
+        go.Bar(
+            x=ohlcv_data['ohlcv_timestamp'],
+            y=ohlcv_data['volume'],
+            name='Volume',
+            marker=dict(color='rgba(0, 0, 255, 0.2)')
+        ),
         row=2, col=1
     )
 
@@ -387,7 +416,6 @@ def main() -> None:
     start_time = TOKENS["start"]
     end_time = TOKENS["end"]
 
-    # Check if the catalog is set, if not, set it.
     catalog = None
     chunk_size = None
     stable = None
@@ -400,7 +428,6 @@ def main() -> None:
         atlas.set_catalog(start_time, end_time, CHUNK_SIZE, TOKENS["stable"], np.array([]))
         logger.debug(__file__, main.__name__, "Catalog data generated and saved.", Atlas.__name__)
 
-    # Set chunk size and stable if left at None value.
     if chunk_size is None:
         chunk_size = CHUNK_SIZE
     if stable is None:
@@ -408,7 +435,6 @@ def main() -> None:
 
     logger.debug(__file__, main.__name__, f"Catalog:\n\tStart: {utc_to_formatted(start_time)}\n\tEnd: {utc_to_formatted(end_time)}\n\tChunk Size: {chunk_size}\n\tStable: {stable}", Atlas.__name__)
 
-    # Checks to ensure config is remaining consistent with generated data in DB.
     if chunk_size != CHUNK_SIZE:
         logger.error(__file__, main.__name__, f"Catalog chunk size {chunk_size} != configured chunk size {CHUNK_SIZE}. Exiting.", Atlas.__name__)
         exit()
@@ -424,15 +450,13 @@ def main() -> None:
         logger.error(__file__, main.__name__, f"Catalog end time {utc_to_formatted(end_time)} != configured end time {utc_to_formatted(configured_end)}. Exiting.", Atlas.__name__)
         exit()
 
-    # Initialize token table
     token_config = TOKENS["tokens"][0]
-    # Set the token in Atlas before accessing token-specific methods
     atlas.token = token_config["name"]
-    atlas.create_token_table(token_config["name"])
+    atlas.migrate_timestamps()
+    atlas.create_token_table()
     atlas.set_token_initial(token_config["initial_price"], token_config["volatility"], token_config["popularity"])
     logger.debug(__file__, main.__name__, "Token table initialized as needed and initial configuration set.")
 
-    # Generate or retrieve combined wave and save it to the database
     try:
         factors_wave_df = atlas.get_token_factors()
         if factors_wave_df.empty:
@@ -448,15 +472,13 @@ def main() -> None:
         logger.debug(__file__, main.__name__, "Generated and saved combined wave data.", Atlas.__name__)
 
     try:
-        # Retrieve the latest price data point if it exists
         latest_data = atlas.get_latest_price()
         if latest_data is not None and not latest_data.empty:
-            last_timestamp = latest_data['timestamp'].iloc[-1]
+            last_timestamp = latest_data['price_timestamp'].iloc[-1]
             if isinstance(last_timestamp, bytes):
-                print("Last ts in bytes...")
                 last_timestamp = int.from_bytes(last_timestamp, 'big')
             start_price = latest_data['price'].iloc[-1]
-            current_time = last_timestamp + 1  # Continue from the last timestamp
+            current_time = last_timestamp + 1
             logger.info(__file__, main.__name__, f"Continuing price data generation from timestamp {utc_to_formatted(last_timestamp)}.")
         else:
             start_price = token_config["initial_price"]
@@ -487,11 +509,11 @@ def main() -> None:
     full_price_data = atlas.get_token_price()
     logger.info(__file__, main.__name__, f"Retrieved full price data for complete period. Took: {time.time() - retrieval_start}s")
 
-    full_price_data['timestamp'] = pd.to_datetime(full_price_data['timestamp'], unit='s')
-    hourly_price_data = full_price_data.resample("H", on='timestamp').mean().reset_index()
+    full_price_data['price_timestamp'] = pd.to_datetime(full_price_data['price_timestamp'], unit='s')
+    hourly_price_data = full_price_data.resample("H", on='price_timestamp').mean().reset_index()
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=hourly_price_data['timestamp'], y=hourly_price_data['price'], mode='lines', name='Daily Price'))
+    fig.add_trace(go.Scatter(x=hourly_price_data['price_timestamp'], y=hourly_price_data['price'], mode='lines', name='Hourly Price'))
     fig.update_layout(
         title="Hourly Price Data",
         xaxis_title="Time",
@@ -501,25 +523,41 @@ def main() -> None:
     fig.show()
     logger.info(__file__, main.__name__, "Completed plot generation for hourly price data.")
 
-    # Convert price data to OHLCV data in chunks
-    current_start = 0
-    chunk_number = 0  # Added to differentiate chunks
-    while current_start < len(full_price_data):
-        current_end = min(current_start + CHUNK_SIZE, len(full_price_data))
-        chunk_data = full_price_data.iloc[current_start:current_end]
+    # Get latest ohlcv data to pick up where we left off, if applicable.
+    try:
+        latest_ohlcv_data = atlas.get_latest_ohlcv()
+        if latest_ohlcv_data is not None and not latest_ohlcv_data.empty:
+            last_ohlcv_timestamp = latest_ohlcv_data['ohlcv_timestamp'].iloc[-1]
+            if isinstance(last_ohlcv_timestamp, bytes):
+                last_ohlcv_timestamp = int.from_bytes(last_ohlcv_timestamp, 'big')
+            current_ohlcv_time = last_ohlcv_timestamp + 1
+            logger.info(__file__, main.__name__, f"Continuing OHLCV data conversion from timestamp {utc_to_formatted(last_ohlcv_timestamp)}.")
+        else:
+            current_ohlcv_time = start_time
+            logger.info(__file__, main.__name__, "Starting OHLCV data conversion from the beginning.")
+    except ValueError:
+        current_ohlcv_time = start_time
+        logger.info(__file__, main.__name__, "Starting OHLCV data conversion from the beginning (no previous data).")
 
-        # Debugging statements
-        logger.info(__file__, main.__name__, f"Processing chunk {chunk_number} from index {current_start} to {current_end}.")
-        logger.info(__file__, main.__name__, f"Chunk {chunk_number} timestamps: {chunk_data['timestamp'].values}")
-        
+    chunk_size = 5 * 24 * 60 * 60
+    total_data = len(full_price_data)
+    num_chunks = total_data // chunk_size + (total_data % chunk_size != 0)
+
+    for i in range(num_chunks):
+        start_idx = i * chunk_size
+        end_idx = min(start_idx + chunk_size, total_data)
+        chunk_data = full_price_data.iloc[start_idx:end_idx]
+
+        logger.info(__file__, main.__name__, f"Processing chunk {i} from index {start_idx} to {end_idx}.")
+        logger.info(__file__, main.__name__, f"Chunk {i} timestamps: {chunk_data['price_timestamp'].values}")
+
         ohlcv_data_chunk = convert_to_ohlcv(chunk_data, token_config)
-        print(ohlcv_data_chunk.dtypes)
-        print(ohlcv_data_chunk.head())
         atlas.append_token_ohlcv(ohlcv_data_chunk)
-        plot_ohlcv_data(ohlcv_data_chunk)
-        
-        current_start = current_end
-        chunk_number += 1  # Increment chunk number
+
+        if i == 1:
+            one_day_price_chunk = chunk_data[chunk_data['price_timestamp'] < chunk_data['price_timestamp'].iloc[0] + pd.Timedelta(days=1)]
+            one_day_ohlcv_chunk = ohlcv_data_chunk[ohlcv_data_chunk['ohlcv_timestamp'] < ohlcv_data_chunk['ohlcv_timestamp'].iloc[0] + pd.Timedelta(days=1)]
+            plot_ohlcv_data(one_day_ohlcv_chunk, one_day_price_chunk)
 
     logger.info(__file__, main.__name__, "Completed plot generation for OHLCV data.")
 

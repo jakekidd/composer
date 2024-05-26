@@ -78,30 +78,30 @@ class Atlas:
             else:
                 raise ValueError("Catalog information not found.")
 
-    def create_token_table(self, token: str) -> None:
+    def create_token_table(self) -> None:
         """
         Create a table for a token in the database if it does not exist.
 
         Args:
             token (str): The token name.
         """
-        self.token = token
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(f"""
-                CREATE TABLE IF NOT EXISTS {token} (
+                CREATE TABLE IF NOT EXISTS {self.token} (
                     id INTEGER PRIMARY KEY,
                     initial REAL,
                     volatility REAL,
                     popularity REAL,
-                    timestamp REAL,
+                    price_timestamp REAL,
                     price REAL,
+                    ohlcv_timestamp REAL,
                     ohlcv BLOB,
                     factors BLOB
                 )
             """)
             conn.commit()
-        self.logger.debug(__file__, "create_token_table", f"Created table for token {token}.", Atlas.__name__)
+        self.logger.debug(__file__, "create_token_table", f"Created table for token {self.token}.", Atlas.__name__)
 
     def set_token_initial(self, initial: float, volatility: float, popularity: float) -> None:
         """
@@ -125,13 +125,13 @@ class Atlas:
         Append new price data for a token in the database.
 
         Args:
-            price_data (pd.DataFrame): DataFrame containing price data with columns ['timestamp', 'price'].
+            price_data (pd.DataFrame): DataFrame containing price data with columns ['price_timestamp', 'price'].
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.executemany(f"""
-                INSERT INTO {self.token} (timestamp, price) VALUES (?, ?)
-            """, [(row['timestamp'], row['price']) for _, row in price_data.iterrows()])
+                INSERT INTO {self.token} (price_timestamp, price) VALUES (?, ?)
+            """, [(row['price_timestamp'], row['price']) for _, row in price_data.iterrows()])
             conn.commit()
         self.logger.debug(__file__, "append_token_price", f"Appended new price data for token {self.token}.", Atlas.__name__)
 
@@ -140,15 +140,30 @@ class Atlas:
         Append new OHLCV data for a token in the database.
 
         Args:
-            ohlcv_data (pd.DataFrame): DataFrame containing OHLCV data with columns ['timestamp', 'open', 'high', 'low', 'close', 'volume'].
+            ohlcv_data (pd.DataFrame): DataFrame containing OHLCV data with columns ['ohlcv_timestamp', 'open', 'high', 'low', 'close', 'volume'].
         """
-        ohlcv_blob = ohlcv_data.to_json().encode('utf-8')
+        # Validate and convert timestamps
+        for i, value in ohlcv_data['ohlcv_timestamp'].items():
+            if isinstance(value, int):
+                ohlcv_data.at[i, 'ohlcv_timestamp'] = float(value)
+            elif not isinstance(value, float):
+                raise ValueError(f"Invalid timestamp value at index {i}: {value}")
+
+        ohlcv_data['ohlcv_timestamp'] = ohlcv_data['ohlcv_timestamp'].astype(float)
+
+        # Prepare data for insertion
+        records = [
+            (row['ohlcv_timestamp'], row[['open', 'high', 'low', 'close', 'volume']].to_json().encode('utf-8'))
+            for _, row in ohlcv_data.iterrows()
+        ]
+
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute(f"""
-                INSERT INTO {self.token} (timestamp, ohlcv) VALUES (?, ?)
-            """, (ohlcv_data['timestamp'].iloc[0], ohlcv_blob))
+            cursor.executemany(f"""
+                INSERT INTO {self.token} (ohlcv_timestamp, ohlcv) VALUES (?, ?)
+            """, records)
             conn.commit()
+
         self.logger.debug(__file__, "append_token_ohlcv", f"Appended new OHLCV data for token {self.token}.", Atlas.__name__)
 
     def set_token_factors(self, factors_data: pd.DataFrame) -> None:
@@ -178,8 +193,8 @@ class Atlas:
             cursor = conn.cursor()
             cursor.execute(f"DELETE FROM {self.token} WHERE price IS NOT NULL")
             cursor.executemany(f"""
-                INSERT INTO {self.token} (timestamp, price) VALUES (?, ?)
-            """, [(row['timestamp'], row['price']) for _, row in price_data.iterrows()])
+                INSERT INTO {self.token} (price_timestamp, price) VALUES (?, ?)
+            """, [(row['price_timestamp'], row['price']) for _, row in price_data.iterrows()])
             conn.commit()
         self.logger.debug(__file__, "set_token_price", f"Set new price data for token {self.token}.", Atlas.__name__)
 
@@ -187,17 +202,33 @@ class Atlas:
         """
         Retrieve the latest data point for the token.
         """
-        query = f"SELECT timestamp, price FROM {self.token} ORDER BY timestamp DESC LIMIT 1"
+        query = f"SELECT price_timestamp, price FROM {self.token} ORDER BY price_timestamp DESC LIMIT 1"
         self.logger.debug(__file__, "get_latest_price", f"Executing query: {query}")
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(query)
             result = cursor.fetchone()
             if result:
-                latest_data = pd.DataFrame([result], columns=['timestamp', 'price'])
+                latest_data = pd.DataFrame([result], columns=['price_timestamp', 'price'])
                 return latest_data
             else:
-                return pd.DataFrame(columns=['timestamp', 'price'])
+                return pd.DataFrame(columns=['price_timestamp', 'price'])
+
+    def get_latest_ohlcv(self):
+        """
+        Retrieve the latest OHLCV data point for the token.
+        """
+        query = f"SELECT ohlcv_timestamp, ohlcv FROM {self.token} ORDER BY ohlcv_timestamp DESC LIMIT 1"
+        self.logger.debug(__file__, "get_latest_ohlcv", f"Executing query: {query}")
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            result = cursor.fetchone()
+            if result:
+                latest_data = pd.DataFrame([result], columns=['ohlcv_timestamp', 'ohlcv'])
+                return latest_data
+            else:
+                return pd.DataFrame(columns=['ohlcv_timestamp', 'ohlcv'])
 
     def get_token_factors(self) -> pd.DataFrame:
         """
@@ -227,9 +258,9 @@ class Atlas:
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute(f"SELECT timestamp, price FROM {self.token} WHERE timestamp IS NOT NULL")
+            cursor.execute(f"SELECT price_timestamp, price FROM {self.token} WHERE price_timestamp IS NOT NULL")
             data = cursor.fetchall()
-        df = pd.DataFrame(data, columns=['timestamp', 'price'])
+        df = pd.DataFrame(data, columns=['price_timestamp', 'price'])
         self.logger.debug(__file__, "get_token_price", f"Retrieved token price data for {self.token}.", Atlas.__name__)
         return df
 
@@ -238,7 +269,7 @@ class Atlas:
         Retrieve the token OHLCV data from the database.
 
         Returns:
-            pd.DataFrame: DataFrame containing the token OHLCV data with columns ['timestamp', 'open', 'high', 'low', 'close', 'volume'].
+            pd.DataFrame: DataFrame containing the token OHLCV data with columns ['ohlcv_timestamp', 'open', 'high', 'low', 'close', 'volume'].
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -251,6 +282,20 @@ class Atlas:
         else:
             self.logger.debug(__file__, "get_token_ohlcv", f"No OHLCV data found for token {self.token}.", Atlas.__name__)
             return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+    # To be used a few times in generate.py to get data where it needs to be.
+    def migrate_timestamps(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            # Check if the migration is needed
+            cursor.execute(f"PRAGMA table_info({self.token})")
+            columns = [info[1] for info in cursor.fetchall()]
+            if "price_timestamp" not in columns:
+                cursor.execute(f"ALTER TABLE {self.token} RENAME COLUMN timestamp TO price_timestamp")
+                cursor.execute(f"ALTER TABLE {self.token} ADD COLUMN ohlcv_timestamp REAL")
+                conn.commit()
+            self.logger.debug(__file__, "__migrate_timestamps", f"Migrated timestamp columns for token {self.token}.")
+
 
 # Ensure the data directory exists
 os.makedirs("data", exist_ok=True)
