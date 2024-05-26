@@ -1,0 +1,19 @@
+{
+  "start": 1577836800,
+  "end": 1735689600,
+  "stable": "USDC",
+  "tokens": [
+    {
+      "name": "TEST",
+      "initial": 5.00,
+      "volatility": 0.4,
+      "popularity": 1.0,
+      "total": 1000000,
+      "slope": 0.1,
+      "cycle": {
+        "period": 14,
+        "weight": 0.3
+      }
+    }
+  ]
+}
