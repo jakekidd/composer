@@ -38,8 +38,8 @@ class Generator:
         return ohlcv_df
 
     def _volume(self, ohlcv_df):
-        base_volume = self.config["tokens"][0]["total"] * self.config["tokens"][0]["volatility"]
-        volume_random_walk = np.random.normal(loc=0, scale=0.7, size=len(ohlcv_df))
+        base_volume = self.config["tokens"][0]["total"] * self.config["tokens"][0]["volatility"] * 0.1
+        volume_random_walk = np.random.normal(loc=0, scale=0.9, size=len(ohlcv_df))
         volume = []
 
         for i in range(len(ohlcv_df)):
@@ -57,5 +57,11 @@ class Generator:
         volume = np.array(volume)
         if len(volume) < len(ohlcv_df):
             volume = np.append(volume, volume[-1])
+
+        # Second pass to correct negative or zero volumes
+        for i in range(1, len(volume)):
+            if volume[i] <= 0:
+                volume[i] = volume[i-1]
+
         ohlcv_df['volume'] = volume
         return ohlcv_df
