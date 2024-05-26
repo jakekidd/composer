@@ -75,7 +75,7 @@ def plot_full_ohlcv(ohlcv_df, filename='ohlcv_full_plot.html'):
         x=daily_ohlcv_df.index,
         y=daily_ohlcv_df['volume'],
         name='Volume',
-        marker_color='rgba(0, 0, 255, 1.0)'
+        marker_color='rgb(0, 0, 255)'
     ), row=2, col=1)
 
     # Update layout

@@ -1,7 +1,7 @@
-import sys
 import time
 import random
 import pandas as pd
+import numpy as np
 from src.composer.utils.logger import Logger
 from src.composer.utils.config import load_config
 from src.composer.create.generate import Generator
@@ -32,7 +32,7 @@ def main():
 
             seed = atlas.get_token_seed(token["name"])
             if seed is None:
-                seed = config.get("seed", random.randint(0, 1000000))
+                seed = config.get("seed", random.randint(0, 1e6))
                 atlas.store_token_seed(token["name"], seed)
             print(f"Using seed: {seed}")
 
@@ -54,6 +54,7 @@ def main():
                 if start_price is None:
                     raise ValueError(f"Start price for token {token['name']} could not be determined.")
 
+                # Ensure the seed is passed to the ohlcv method
                 ohlcv_df = generator.ohlcv(
                     start_date=pd.to_datetime(current_timestamp, unit='s'),
                     periods=periods,
