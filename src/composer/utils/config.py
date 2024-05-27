@@ -1,8 +1,9 @@
 import json
 import os
 import random
-from typing import Any, Dict
+from typing import Any
 from jsonschema import validate, ValidationError
+from .frozen import FrozenDict
 
 config_schema = {
     "type": "object",
@@ -38,17 +39,12 @@ config_schema = {
     "required": ["start", "end", "stable", "tokens"]
 }
 
-def load_config(config_path: str = 'config.json') -> Dict[str, Any]:
+def load_config(config_path: str = 'config.json') -> FrozenDict[str, Any]:
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     with open(config_path, 'r') as file:
         config = json.load(file)
-
-    try:
-        validate(instance=config, schema=config_schema)
-    except ValidationError as e:
-        raise ValueError(f"Invalid configuration: {e.message}")
 
     # Fill in default values if some are missing
     default_config = {
@@ -62,8 +58,14 @@ def load_config(config_path: str = 'config.json') -> Dict[str, Any]:
         if key not in config:
             config[key] = value
 
+    try:
+        validate(instance=config, schema=config_schema)
+    except ValidationError as e:
+        raise ValueError(f"Invalid configuration: {e.message}")
+
     for token in config["tokens"]:
         if "seed" not in token or token["seed"] is None:
-            token["seed"] = random.randint(0, 1000000)
+            token["seed"] = random.randint(0, 1e6)
 
-    return config
+    frozen = FrozenDict(config)
+    return frozen

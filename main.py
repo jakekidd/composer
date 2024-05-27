@@ -30,10 +30,11 @@ def main():
             chunk_size_seconds = total_duration_seconds
             current_timestamp = start_timestamp
 
-            seed = atlas.get_token_seed(token["name"])
-            if seed is None:
-                seed = config.get("seed", random.randint(0, 1e6))
-                atlas.store_token_seed(token["name"], seed)
+            seed = token["seed"]
+            # seed = atlas.get_token_seed(token["name"])
+            # if seed is None:
+            #     seed = config.get("seed", random.randint(0, 1e6))
+            #     atlas.store_token_seed(token["name"], seed)
             print(f"Using seed: {seed}")
 
             while current_timestamp < end_timestamp:
